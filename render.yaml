@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: portal-b2b-proveedores
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: RENDER
+        value: "1"
+      - key: SUPABASE_DB_URL
+        sync: false
