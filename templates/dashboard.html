@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Portal B2B · {{ proveedor_nombre }}</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+<div id="app">
+  <aside class="sidebar" style="display:flex;flex-direction:column">
+    <div class="brand"><div class="mark">B2B</div><div><b>{{ proveedor_nombre }}</b><small>Portal de proveedor</small></div></div>
+    <div style="padding:.9rem .9rem .3rem;font-size:.68rem;letter-spacing:.05em;text-transform:uppercase;color:var(--sb-tx);opacity:.7">Menú</div>
+    <div id="navLinks"></div>
+    <div class="navfoot"><a class="navlink" href="{{ url_for('logout') }}" style="margin:0;text-decoration:none"><span class="ic">⏻</span> Salir</a></div>
+  </aside>
+  <div class="main">
+    <header class="topbar">
+      <div><span class="pname">{{ proveedor_nombre }}</span><div class="pmeta" id="topMeta"></div></div>
+    </header>
+    <div class="content"><div id="view">Cargando…</div></div>
+  </div>
+</div>
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body></html>

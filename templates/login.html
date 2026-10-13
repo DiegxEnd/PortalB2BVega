@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Portal B2B · Ingreso</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+<section id="login">
+  <div class="auth">
+    <div class="mark">B2B</div>
+    <h1>Portal de Proveedores</h1>
+    <p>Ingresa con tu usuario y contraseña.</p>
+    <form method="post">
+      <input name="usuario" class="fld" placeholder="Usuario" autocomplete="username" autofocus>
+      <input name="password" type="password" class="fld" placeholder="Contraseña" autocomplete="current-password">
+      {% if error %}<div class="err">{{ error }}</div>{% endif %}
+      <button class="btn btn-ac w" type="submit">Ingresar</button>
+    </form>
+  </div>
+</section>
+</body></html>
