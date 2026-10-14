@@ -17,7 +17,7 @@ def _cobertura(df):
     if not len(df):
         return 0
     por_cliente = df.groupby('codigo_cliente')['importe_neto_sin_impuesto'].sum()
-    return int((por_cliente > 0).sum())
+    return int((por_cliente != 0).sum())
 
 
 def resumen(df_ventas, df_stock):
