@@ -16,11 +16,16 @@ from functools import wraps
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
+# Se importa el dialecto al arrancar: si lo carga create_engine() la primera
+# vez, varios hilos a la vez (gunicorn --threads + precalentado) chocan con
+# "cannot access submodule 'postgresql' ... circular import".
+import sqlalchemy.dialects.postgresql.psycopg2  # noqa: F401
 from dotenv import load_dotenv
 
 load_dotenv()
 
 _ENGINE = None
+_ENGINE_LOCK = threading.Lock()
 
 # Caché en memoria: las ventas se cargan una vez al día y el stock cada hora,
 # así que no tiene sentido repetir la misma consulta en cada recarga.
@@ -50,7 +55,12 @@ def _cacheado(fn):
 
 def _engine():
     global _ENGINE
-    if _ENGINE is None:
+    if _ENGINE is not None:
+        return _ENGINE
+    # Un solo hilo crea el engine; los demás esperan y reutilizan el mismo.
+    with _ENGINE_LOCK:
+        if _ENGINE is not None:
+            return _ENGINE
         url = os.environ.get("SUPABASE_DB_URL")
         if not url:
             raise RuntimeError(
