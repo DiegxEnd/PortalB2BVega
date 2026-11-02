@@ -101,18 +101,34 @@ def _etiqueta(f):
     return f["clave"]
 
 
+def periodo_anterior(desde, hasta):
+    """
+    Con qué se compara el período (mismo criterio que rangoAnterior en app.js):
+    - Mes en curso (desde el día 1, dentro de un mes): los mismos días del mes
+      anterior. 1–2 nov se compara con 1–2 oct, no con 30–31 oct (fin de mes).
+    - Cualquier otro rango: los mismos días inmediatamente anteriores.
+    """
+    if desde.day == 1 and (desde.year, desde.month) == (hasta.year, hasta.month):
+        ultimo_ant = desde - timedelta(days=1)
+        inicio_ant = ultimo_ant.replace(day=1)
+        fin_ant = ultimo_ant.replace(day=min(hasta.day, ultimo_ant.day))
+        return inicio_ant, fin_ant
+    dias = (hasta - desde).days + 1
+    fin_ant = desde - timedelta(days=1)
+    return fin_ant - timedelta(days=dias - 1), fin_ant
+
+
 def calcular(proveedor, desde, hasta, filtros=()):
     hoy_desde, hoy_hasta = date.fromisoformat(desde), date.fromisoformat(hasta)
     dias = (hoy_hasta - hoy_desde).days + 1
-    ant_hasta = hoy_desde - timedelta(days=1)
-    ant_desde = ant_hasta - timedelta(days=dias - 1)
+    ant_desde, ant_hasta = periodo_anterior(hoy_desde, hoy_hasta)
     ant_desde_s, ant_hasta_s = ant_desde.isoformat(), ant_hasta.isoformat()
 
     act = db.resumen_ventas(proveedor, desde, hasta, filtros)
     ant = db.resumen_ventas(proveedor, ant_desde_s, ant_hasta_s, filtros)
     filtros_stock = tuple(f for f in filtros if f[0] in db.FILTROS_STOCK)
     inventario = db.dias_inventario(proveedor, DIAS_VENTA_INVENTARIO, filtros_stock)
-    variacion = db.variacion_por_dimension(proveedor, ant_desde_s, desde, hasta, filtros)
+    variacion = db.variacion_por_dimension(proveedor, ant_desde_s, ant_hasta_s, desde, hasta, filtros)
     ultima = db.ultima_sincronizacion(proveedor)
 
     hay_anterior = ant["venta_neta"] > 0
@@ -157,6 +173,8 @@ def calcular(proveedor, desde, hasta, filtros=()):
         t(", ")
         t(f"{_pct(v_venta)} {'más' if v_venta >= 0 else 'menos'}", "up" if v_venta >= 0 else "down")
         t(f" que del {_fecha(ant_desde_s)} al {_fecha(ant_hasta_s)}. ")
+        if dias < 7:
+            t(f"(Ojo: el período tiene solo {dias} día{'s' if dias > 1 else ''}; la comparación puede variar mucho según el día de la semana.) ")
         if abs(v_venta) >= UMBRAL_VARIACION and v_clientes is not None and v_vpc is not None:
             sube = v_venta > 0
             if (v_clientes > 0) == sube and (v_vpc > 0) != sube:

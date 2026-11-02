@@ -110,6 +110,10 @@ def _leer(path, columnas):
         if final and final not in renombrar.values():
             renombrar[c] = final
     df = df[list(renombrar)].rename(columns=renombrar)
+    # Quita los espacios de relleno del ERP ('POSTRES      ' -> 'POSTRES'); un
+    # texto que queda vacío pasa a NULL.
+    for c in df.columns:
+        df[c] = df[c].str.strip().replace('', None)
     df = df.where(pd.notnull(df), None)
     if 'lote' in df.columns:
         # Lote es parte de la llave única de stock: no puede quedar NULL

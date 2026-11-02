@@ -38,9 +38,42 @@ _CACHE = {}
 _CACHE_LOCK = threading.Lock()
 
 
+# Firma de los datos: si cambia (hubo una carga nueva), se descarta toda la
+# caché para no mostrar datos viejos hasta 30 min. Se revisa como máximo una
+# vez por minuto con una consulta liviana (máximos de índices primarios).
+REVISAR_FIRMA_CADA = 60
+_FIRMA = {"valor": None, "revisada": 0.0}
+_FIRMA_LOCK = threading.Lock()
+
+
+def _revisar_firma():
+    ahora = time.monotonic()
+    if ahora - _FIRMA["revisada"] < REVISAR_FIRMA_CADA:
+        return
+    if not _FIRMA_LOCK.acquire(blocking=False):
+        return
+    try:
+        _FIRMA["revisada"] = ahora
+        fila = _leer_uno("""
+            SELECT (SELECT MAX(id) FROM public.ventas) AS v,
+                   (SELECT MAX(id) FROM public.stock) AS s,
+                   (SELECT MAX(fecha_proceso) FROM public.rotacion) AS r
+        """, {})
+        firma = (fila.get("v"), fila.get("s"), str(fila.get("r")))
+        if _FIRMA["valor"] is not None and firma != _FIRMA["valor"]:
+            with _CACHE_LOCK:
+                _CACHE.clear()
+        _FIRMA["valor"] = firma
+    except Exception:
+        pass  # si falla la revisión, se sigue con la caché normal
+    finally:
+        _FIRMA_LOCK.release()
+
+
 def _cacheado(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
+        _revisar_firma()
         clave = (fn.__name__, args, tuple(sorted(kwargs.items())))
         ahora = time.monotonic()
         with _CACHE_LOCK:
@@ -393,14 +426,17 @@ DIM_VARIACION = ("canal", "tipo_negocio", "jefe_ventas", "supervisor", "sede",
 
 
 @_cacheado
-def variacion_por_dimension(proveedor, ant_desde, corte, hasta, filtros=()):
+def variacion_por_dimension(proveedor, ant_desde, ant_hasta, corte, hasta, filtros=()):
     """
-    Venta y clientes de cada valor de cada dimensión en dos períodos seguidos
-    (anterior: ant_desde..corte-1, actual: corte..hasta), en una sola lectura.
-    Sirve para explicar qué canal, supervisor, producto, etc. movió el total.
+    Venta y clientes de cada valor de cada dimensión en dos períodos
+    (anterior: ant_desde..ant_hasta, actual: corte..hasta), en una sola lectura.
+    Los períodos pueden no ser seguidos (1–2 oct vs 1–2 nov). Sirve para
+    explicar qué canal, supervisor, producto, etc. movió el total.
     """
     where, params = _where_ventas(proveedor, ant_desde, hasta, filtros)
+    where += " AND (v.fecha_documento >= :corte OR v.fecha_documento <= :ant_hasta)"
     params["corte"] = corte
+    params["ant_hasta"] = ant_hasta
     pares = ", ".join(f"('{d}', vf.{d}::text)" for d in DIM_VARIACION)
     return _filas(f"""
         WITH vf AS (

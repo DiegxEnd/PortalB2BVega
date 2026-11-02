@@ -402,8 +402,19 @@ async function render() {
 }
 const pintar = (vigente, html) => { if (!vigente()) return false; document.getElementById('view').innerHTML = html; icons(); return true; };
 
+// Período de comparación (mismo criterio que hallazgos.periodo_anterior):
+// - Mes en curso (desde el día 1, dentro de un mismo mes): mismos días del mes
+//   anterior. 1–2 nov se compara con 1–2 oct, no con 30–31 oct.
+// - Cualquier otro rango: los mismos días inmediatamente anteriores.
 function rangoAnterior(ini, fin) {
   const dias = Math.round((new Date(fin) - new Date(ini)) / 864e5) + 1;
+  if (ini.slice(8) === '01' && ini.slice(0, 7) === fin.slice(0, 7)) {
+    const [y, m] = ini.split('-').map(Number);
+    const inicioAnt = ISO(new Date(Date.UTC(y, m - 2, 1)));
+    const ultimoAnt = addDays(ini, -1);                       // último día del mes anterior
+    const finAnt = inicioAnt.slice(0, 8) + fin.slice(8);
+    return { ini: inicioAnt, fin: finAnt > ultimoAnt ? ultimoAnt : finAnt, dias, mismoTramo: true };
+  }
   const finAnt = addDays(ini, -1);
   return { ini: addDays(finAnt, -(dias - 1)), fin: finAnt, dias };
 }
