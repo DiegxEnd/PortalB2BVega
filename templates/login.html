@@ -3,22 +3,74 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Portal B2B · Ingreso</title>
+<title>Portal B2B · Grupo Vega</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+<script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
 </head>
 <body>
-<section id="login">
-  <div class="auth">
-    <div class="mark">B2B</div>
-    <h1>Portal de Proveedores</h1>
-    <p>Ingresa con tu usuario y contraseña.</p>
-    <form method="post">
-      <input name="usuario" class="fld" placeholder="Usuario" autocomplete="username" autofocus>
-      <input name="password" type="password" class="fld" placeholder="Contraseña" autocomplete="current-password">
-      {% if error %}<div class="err">{{ error }}</div>{% endif %}
-      <button class="btn btn-ac w" type="submit">Ingresar</button>
-    </form>
-  </div>
-</section>
-</body></html>
+<main class="login">
+  <section class="login-hero">
+    <div class="login-brand">
+      <div class="logo">GV</div>
+      <div><b>Grupo Vega Distribución</b><small>Portal B2B de proveedores</small></div>
+    </div>
+
+    <div class="login-copy">
+      <h1>Tu sell out, claro y al día.</h1>
+      <p>Consulta ventas, cobertura, inventario y días de stock de tu marca en todas nuestras sedes, y descarga la información cuando la necesites.</p>
+      <div class="login-feats">
+        <div class="login-feat"><div class="ic"><i data-lucide="trending-up"></i></div><div><b>Ventas y cobertura</b><span>Por sede, canal, distrito y producto</span></div></div>
+        <div class="login-feat"><div class="ic"><i data-lucide="package"></i></div><div><b>Inventario</b><span>Stock y días de inventario</span></div></div>
+        <div class="login-feat"><div class="ic"><i data-lucide="refresh-cw"></i></div><div><b>Siempre actualizado</b><span>Ventas diarias · stock cada hora</span></div></div>
+        <div class="login-feat"><div class="ic"><i data-lucide="download"></i></div><div><b>Descargas 24/7</b><span>Reportes listos para Excel</span></div></div>
+      </div>
+    </div>
+
+    <div class="login-foot">© Grupo Vega Distribución · Información confidencial del proveedor</div>
+  </section>
+
+  <section class="login-form">
+    <div class="login-card">
+      <h2>Bienvenido</h2>
+      <p>Ingresa con el usuario y contraseña de tu empresa.</p>
+
+      {% if error %}<div class="alert"><i data-lucide="circle-alert"></i>{{ error }}</div>{% endif %}
+
+      <form method="post" id="frmLogin">
+        <div class="inp">
+          <label for="usuario">Usuario</label>
+          <input id="usuario" name="usuario" class="fld" placeholder="tu usuario" autocomplete="username" autofocus required>
+          <i data-lucide="user"></i>
+        </div>
+        <div class="inp">
+          <label for="password">Contraseña</label>
+          <input id="password" name="password" type="password" class="fld" placeholder="••••••••" autocomplete="current-password" required>
+          <i data-lucide="lock"></i>
+          <button type="button" class="eye" id="btnEye" aria-label="Mostrar contraseña"><i data-lucide="eye"></i></button>
+        </div>
+        <button class="btn btn-ac w" type="submit" id="btnIn"><span>Ingresar</span><i data-lucide="arrow-right"></i></button>
+      </form>
+
+      <div class="login-help"><i data-lucide="shield-check"></i>Conexión segura. Solo ves la información de tu empresa.</div>
+    </div>
+  </section>
+</main>
+<script>
+  lucide.createIcons();
+  const pwd = document.getElementById('password');
+  document.getElementById('btnEye').addEventListener('click', e => {
+    const ver = pwd.type === 'password';
+    pwd.type = ver ? 'text' : 'password';
+    e.currentTarget.innerHTML = `<i data-lucide="${ver ? 'eye-off' : 'eye'}"></i>`;
+    lucide.createIcons();
+  });
+  document.getElementById('frmLogin').addEventListener('submit', () => {
+    const b = document.getElementById('btnIn');
+    b.disabled = true;
+    b.innerHTML = '<span class="spinner"></span><span>Ingresando…</span>';
+  });
+</script>
+</body>
+</html>

@@ -2,5 +2,7 @@ __pycache__/
 *.pyc
 .env
 venv/
+.vscode/
 *.xlsm
 *.xlsx
+~$*

@@ -14,14 +14,19 @@ Flujo completo (ver README.md para el detalle):
 Los datos y las credenciales nunca llegan al navegador hasta que el
 servidor valida la sesión — "Ver código fuente" no muestra nada.
 """
+import io
 import os
+import tempfile
+import threading
+import time
+import zipfile
 from functools import wraps
 
-from flask import Flask, render_template, request, redirect, url_for, session, jsonify, Response, stream_with_context, abort
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify, Response, stream_with_context, abort, send_file
 
 import auth
 import db
-import medidas as kpi
+import hallazgos
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'cambia-esto-en-produccion-no-uses-el-default')
@@ -29,7 +34,45 @@ app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = os.environ.get('RENDER', '') != ''
 
-CAMPOS_AGRUPABLES = {'canal', 'tipo_negocio', 'codigo_producto', 'supervisor', 'jefe_ventas'}
+
+# ---------------------------------------------------------------------------
+#  Precalentado de caché: al arrancar (y cada 25 min) se calcula lo que todo
+#  el mundo ve primero —"Este mes" sin filtros—, así el primer usuario no
+#  espera las consultas en frío. Las llamadas usan exactamente los mismos
+#  argumentos que los endpoints para que caigan en la misma llave de caché.
+# ---------------------------------------------------------------------------
+PRECALENTAR_CADA = 25 * 60
+
+
+def _precalentar_proveedor(proveedor):
+    minimo, maximo = db.rango_disponible(proveedor)
+    if not maximo:
+        return
+    db.ultima_sincronizacion(proveedor)
+    db.opciones_filtros(proveedor)
+    inicio = maximo[:8] + '01'
+    db.resumen_ventas(proveedor, inicio, maximo, ())
+    db.resumen_stock(proveedor, ())
+    db.agrupar_ventas(proveedor, 'mes', minimo, maximo, None, (), 'venta')
+    for campo in ('semana', 'canal', 'dia_semana', 'sede', 'categoria'):
+        db.agrupar_ventas(proveedor, campo, inicio, maximo, None, (), 'venta')
+    db.agrupar_ventas(proveedor, 'codigo_producto', inicio, maximo, 10, (), 'venta')
+    hallazgos.calcular(proveedor, inicio, maximo, ())
+
+
+def _precalentar():
+    proveedores = sorted({u['proveedor_codigo'] for u in auth.USUARIOS.values()})
+    while True:
+        for proveedor in proveedores:
+            try:
+                _precalentar_proveedor(proveedor)
+            except Exception:
+                app.logger.exception('No se pudo precalentar la caché de %s', proveedor)
+        time.sleep(PRECALENTAR_CADA)
+
+
+if os.environ.get('PRECALENTAR', '1') == '1':
+    threading.Thread(target=_precalentar, name='precalentar', daemon=True).start()
 
 
 def login_required(fn):
@@ -67,7 +110,7 @@ def logout():
 @app.route('/')
 @login_required
 def dashboard():
-    return render_template('dashboard.html', proveedor_nombre=session['proveedor_nombre'])
+    return render_template('dashboard.html', proveedor_nombre=session['proveedor_nombre'], usuario=session['usuario'])
 
 
 def _proveedor():
@@ -107,6 +150,18 @@ def _rango_query():
     return desde, hasta
 
 
+def _filtros():
+    """
+    Filtros de la barra superior: ?sede=A&sede=B&categoria=X ...
+    Se devuelven como tupla ordenada para que sirvan de llave de caché.
+    """
+    filtros = []
+    for campo in db.FILTROS_VENTAS:
+        valores = sorted({v.strip() for v in request.args.getlist(campo) if v.strip()})
+        if valores:
+            filtros.append((campo, tuple(valores[:200])))
+    return tuple(filtros)
+
 
 # ---------------------------------------------------------------------------
 #  API — todo detrás de login, todo acotado al proveedor de la sesión
@@ -119,47 +174,68 @@ def api_rango():
     return jsonify({'desde': desde, 'hasta': hasta, 'ultima_sincronizacion': ultima})
 
 
+@app.route('/api/filtros')
+@login_required
+def api_filtros():
+    return jsonify(db.opciones_filtros(_proveedor()))
+
+
 @app.route('/api/resumen')
 @login_required
 def api_resumen():
     # Los KPI se calculan en PostgreSQL: no descargamos cientos de miles
     # de filas para después sumar los mismos datos en pandas.
     desde, hasta = _rango_query()
-    resultado = db.resumen_ventas(_proveedor(), desde, hasta)
-    resultado.update(db.resumen_stock(_proveedor()))
+    resultado = db.resumen_ventas(_proveedor(), desde, hasta, _filtros())
+    resultado.update(db.resumen_stock(_proveedor(), _filtros()))
     return jsonify(resultado)
 
 
-@app.route('/api/semanal')
+@app.route('/api/hallazgos')
 @login_required
-def api_semanal():
+def api_hallazgos():
     desde, hasta = _rango_query()
-    return jsonify(db.ventas_por_semana(_proveedor(), desde, hasta))
+    if not desde or not hasta:
+        desde, hasta = db.rango_disponible(_proveedor())
+    if not desde:
+        return jsonify({'resumen': [], 'hallazgos': [], 'alertas': 0})
+    return jsonify(hallazgos.calcular(_proveedor(), desde, hasta, _filtros()))
 
 
 @app.route('/api/agrupado/<campo>')
 @login_required
 def api_agrupado(campo):
-    if campo not in CAMPOS_AGRUPABLES:
+    if campo not in db.DIM_VENTAS:
         abort(400)
     desde, hasta = _rango_query()
     top = request.args.get('top', type=int)
-    if campo == 'codigo_producto' and not top:
-        top = 20
-    return jsonify(db.agrupar_ventas(_proveedor(), campo, desde, hasta, top))
+    orden = request.args.get('orden', 'venta')
+    return jsonify(db.agrupar_ventas(_proveedor(), campo, desde, hasta, top, _filtros(), orden))
+
+
+@app.route('/api/dias_inventario')
+@login_required
+def api_dias_inventario():
+    dias = request.args.get('dias', default=30, type=int)
+    if dias not in (7, 15, 30, 60, 90):
+        abort(400)
+    return jsonify(db.dias_inventario(_proveedor(), dias, _filtros()))
 
 
 @app.route('/api/stock')
 @login_required
 def api_stock():
-    return jsonify(db.stock_resumen(_proveedor()))
+    resultado = db.stock_resumen(_proveedor(), _filtros())
+    resultado.update(db.resumen_stock(_proveedor(), _filtros()))
+    return jsonify(resultado)
 
 
 @app.route('/api/exportar.csv')
 @login_required
 def api_exportar():
-    """Exporta CSV por bloques para evitar construir todo el archivo en RAM."""
+    """Ventas o Stock en CSV por bloques; si se piden ambos, un .zip con dos CSV."""
     desde, hasta = _rango_query()
+    filtros = _filtros()
     quiere_ventas = request.args.get('ventas') == '1'
     quiere_stock = request.args.get('stock') == '1'
     proveedor = _proveedor()
@@ -167,23 +243,40 @@ def api_exportar():
     if not quiere_ventas and not quiere_stock:
         abort(400, description='Selecciona Ventas, Stock o ambos para exportar.')
 
-    def generar_csv():
-        # BOM para que Excel detecte UTF-8 correctamente.
-        yield '\ufeff'
-        if quiere_ventas:
-            yield '=== VENTAS ===\r\n'
-            yield from db.iterar_csv('ventas', proveedor, desde, hasta)
-            yield '\r\n'
-        if quiere_stock:
-            yield '=== STOCK ===\r\n'
-            yield from db.iterar_csv('stock', proveedor)
+    sufijo = f'{proveedor}_{desde or "inicio"}_{hasta or "hoy"}'
+    reportes = []
+    if quiere_ventas:
+        reportes.append(('ventas', f'ventas_{sufijo}.csv', desde, hasta))
+    if quiere_stock:
+        reportes.append(('stock', f'stock_{proveedor}.csv', None, None))
 
-    nombre = f'{proveedor}_{desde or "inicio"}_{hasta or "hoy"}.csv'
-    return Response(
-        stream_with_context(generar_csv()),
-        mimetype='text/csv; charset=utf-8',
-        headers={'Content-Disposition': f'attachment; filename="{nombre}"'}
-    )
+    if len(reportes) == 1:
+        tabla, nombre, d, h = reportes[0]
+
+        def generar_csv():
+            # BOM para que Excel detecte UTF-8 correctamente.
+            yield '﻿'
+            yield from db.iterar_csv(tabla, proveedor, d, h, filtros)
+
+        return Response(
+            stream_with_context(generar_csv()),
+            mimetype='text/csv; charset=utf-8',
+            headers={'Content-Disposition': f'attachment; filename="{nombre}"'}
+        )
+
+    # Ambos: se arma el zip en un archivo temporal (en disco, no en RAM).
+    temporal = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024)
+    with zipfile.ZipFile(temporal, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for tabla, nombre, d, h in reportes:
+            with zf.open(nombre, 'w') as destino:
+                texto = io.TextIOWrapper(destino, encoding='utf-8-sig', newline='')
+                for bloque in db.iterar_csv(tabla, proveedor, d, h, filtros):
+                    texto.write(bloque)
+                texto.flush()
+                texto.detach()
+    temporal.seek(0)
+    return send_file(temporal, mimetype='application/zip', as_attachment=True,
+                     download_name=f'paquete_{sufijo}.zip')
 
 
 if __name__ == '__main__':
