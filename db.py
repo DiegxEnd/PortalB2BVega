@@ -16,9 +16,12 @@ from functools import wraps
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
-# Se importa el dialecto al arrancar: si lo carga create_engine() la primera
-# vez, varios hilos a la vez (gunicorn --threads + precalentado) chocan con
-# "cannot access submodule 'postgresql' ... circular import".
+# Se importan el dialecto y el driver al arrancar: si los carga create_engine()
+# la primera vez, varios hilos a la vez (gunicorn --threads + precalentado)
+# chocan con "cannot access submodule 'postgresql' ... circular import".
+import psycopg2  # noqa: F401
+import psycopg2.extensions  # noqa: F401
+import psycopg2.extras  # noqa: F401
 import sqlalchemy.dialects.postgresql.psycopg2  # noqa: F401
 from dotenv import load_dotenv
 
@@ -81,6 +84,14 @@ def _engine():
             connect_args={"connect_timeout": 15},
         )
     return _ENGINE
+
+
+# El engine se crea al importar este módulo (en el hilo principal, antes de que
+# exista cualquier hilo de gunicorn o del precalentado). create_engine() no abre
+# conexiones; solo deja listo el pool. Si falta la variable, el error aparece
+# recién en la primera consulta, con un mensaje claro.
+if os.environ.get("SUPABASE_DB_URL"):
+    _engine()
 
 
 def _filas(sql, params):

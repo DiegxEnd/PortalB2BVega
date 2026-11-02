@@ -42,6 +42,9 @@ app.config['SESSION_COOKIE_SECURE'] = os.environ.get('RENDER', '') != ''
 #  argumentos que los endpoints para que caigan en la misma llave de caché.
 # ---------------------------------------------------------------------------
 PRECALENTAR_CADA = 25 * 60
+# Espera antes del primer precalentado: el servidor termina de arrancar y queda
+# atendiendo a los usuarios antes de que este hilo empiece a consultar.
+PRECALENTAR_ESPERA = 20
 
 
 def _precalentar_proveedor(proveedor):
@@ -62,10 +65,13 @@ def _precalentar_proveedor(proveedor):
 
 def _precalentar():
     proveedores = sorted({u['proveedor_codigo'] for u in auth.USUARIOS.values()})
+    time.sleep(PRECALENTAR_ESPERA)
     while True:
         for proveedor in proveedores:
+            inicio = time.monotonic()
             try:
                 _precalentar_proveedor(proveedor)
+                app.logger.warning('Caché precalentada para %s en %.1f s', proveedor, time.monotonic() - inicio)
             except Exception:
                 app.logger.exception('No se pudo precalentar la caché de %s', proveedor)
         time.sleep(PRECALENTAR_CADA)
