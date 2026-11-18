@@ -14,12 +14,14 @@ Flujo completo (ver README.md para el detalle):
 Los datos y las credenciales nunca llegan al navegador hasta que el
 servidor valida la sesión — "Ver código fuente" no muestra nada.
 """
+import csv
 import io
 import os
 import tempfile
 import threading
 import time
 import zipfile
+from datetime import date
 from functools import wraps
 
 from flask import Flask, render_template, request, redirect, url_for, session, jsonify, Response, stream_with_context, abort, send_file
@@ -60,6 +62,13 @@ def _precalentar_proveedor(proveedor):
     for campo in ('semana', 'canal', 'dia_semana', 'sede', 'categoria'):
         db.agrupar_ventas(proveedor, campo, inicio, maximo, None, (), 'venta')
     db.agrupar_ventas(proveedor, 'codigo_producto', inicio, maximo, 10, (), 'venta')
+    # Comparativo contra el mismo período del año anterior (Resumen y Ventas).
+    ant_inicio, ant_fin = (str(f) for f in hallazgos.periodo_anterior(date.fromisoformat(inicio), date.fromisoformat(maximo)))
+    db.resumen_ventas(proveedor, ant_inicio, ant_fin, ())
+    db.agrupar_ventas(proveedor, 'sede', ant_inicio, ant_fin, None, (), 'venta')
+    db.agrupar_ventas(proveedor, 'canal', ant_inicio, ant_fin, None, (), 'venta')
+    db.segmentos(proveedor, inicio, maximo, (), 'sede')
+    db.clientes_segmento(proveedor, inicio, maximo, (), None, CLIENTES_EN_PANTALLA)
     hallazgos.calcular(proveedor, inicio, maximo, ())
 
 
@@ -217,6 +226,49 @@ def api_agrupado(campo):
     top = request.args.get('top', type=int)
     orden = request.args.get('orden', 'venta')
     return jsonify(db.agrupar_ventas(_proveedor(), campo, desde, hasta, top, _filtros(), orden))
+
+
+@app.route('/api/segmentos')
+@login_required
+def api_segmentos():
+    desde, hasta = _rango_query()
+    dimension = request.args.get('dim', 'sede')
+    if dimension not in db.DIM_SEGMENTOS:
+        abort(400)
+    return jsonify(db.segmentos(_proveedor(), desde, hasta, _filtros(), dimension))
+
+
+CLIENTES_EN_PANTALLA = 300
+
+
+def _segmento_query():
+    segmento = request.args.get('segmento') or None
+    if segmento and segmento not in {s for s, _ in db.SEGMENTOS}:
+        abort(400)
+    return segmento
+
+
+@app.route('/api/segmentos/clientes')
+@login_required
+def api_segmentos_clientes():
+    """Primeros clientes del segmento para la pantalla; el listado completo va por el CSV."""
+    desde, hasta = _rango_query()
+    return jsonify(db.clientes_segmento(_proveedor(), desde, hasta, _filtros(), _segmento_query(), CLIENTES_EN_PANTALLA))
+
+
+@app.route('/api/segmentos/clientes.csv')
+@login_required
+def api_segmentos_clientes_csv():
+    desde, hasta = _rango_query()
+    segmento = _segmento_query()
+    filas = db.clientes_segmento(_proveedor(), desde, hasta, _filtros(), segmento)
+    buffer = io.StringIO(newline='')
+    escritor = csv.writer(buffer)
+    escritor.writerow(db.COLUMNAS_SEGMENTO_CLIENTES)
+    escritor.writerows([f[c] for c in db.COLUMNAS_SEGMENTO_CLIENTES] for f in filas)
+    nombre = f'clientes_segmento_{segmento or "todos"}_{desde or "inicio"}_{hasta or "hoy"}.csv'
+    return Response('﻿' + buffer.getvalue(), mimetype='text/csv; charset=utf-8',
+                    headers={'Content-Disposition': f'attachment; filename="{nombre}"'})
 
 
 @app.route('/api/dias_inventario')

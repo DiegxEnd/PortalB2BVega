@@ -35,8 +35,12 @@ Variable de entorno que necesita (ver README.md):
 import os
 import sys
 import argparse
+import csv
+import glob
 import re
 import unicodedata
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import pandas as pd
 import psycopg2
 import psycopg2.extras
@@ -99,10 +103,39 @@ def _normalizar(nombre):
     return re.sub(r'[^a-z0-9]', '', nombre.lower())
 
 
+def _filas_csv(path):
+    """
+    Lee el CSV reparando las filas que el ERP parte en dos: un salto de línea
+    dentro de un campo (p. ej. un CodigoCliente '47196258\\n') deja una línea
+    con menos columnas que el encabezado; se une con la siguiente.
+    """
+    with open(path, encoding='latin1', newline='') as f:
+        lector = csv.reader(f)
+        encabezado = next(lector)
+        n = len(encabezado)
+        filas, pendiente, reparadas = [], None, 0
+        for fila in lector:
+            if not fila:
+                continue
+            if pendiente is not None:
+                fila = pendiente[:-1] + [pendiente[-1] + fila[0]] + fila[1:]
+                pendiente = None
+            if len(fila) < n:
+                pendiente = fila
+                continue
+            if len(fila) > n:
+                reparadas += 1
+                continue
+            filas.append(fila)
+    if reparadas:
+        print(f'  [AVISO] {os.path.basename(path)}: {reparadas} filas con columnas de más se omitieron.')
+    return pd.DataFrame(filas, columns=encabezado, dtype=str)
+
+
 def _leer(path, columnas):
     if not os.path.exists(path):
         return None
-    df = pd.read_csv(path, encoding='latin1', dtype=str)
+    df = _filas_csv(path)
     destino = {_normalizar(origen): final for origen, final in columnas.items()}
     renombrar = {}
     for c in df.columns:
@@ -122,21 +155,41 @@ def _leer(path, columnas):
     return df
 
 
+# Columnas que se guardan de los años cerrados (ver supabase/migracion_2026_11_17_historico.sql).
+COLUMNAS_HISTORICO = [
+    'proveedor_codigo', 'tipo_documento', 'nro_documento', 'fecha_documento', 'codigo_cliente',
+    'canal', 'tipo_negocio', 'jefe_ventas', 'supervisor', 'codigo_vendedor', 'ruta',
+    'codigo_producto', 'cantidad_unidad_maxima', 'importe_neto_sin_impuesto',
+    'sede', 'distrito', 'linea', 'marca',
+]
+
+
+def _archivos_ventas(carpeta):
+    """VentasActual.csv, VentaHistorica.csv y los de años (VentaHistorica2025.csv, ...)."""
+    nombres = ['VentasActual.csv', 'VentaHistorica.csv']
+    nombres += sorted(os.path.basename(p) for p in glob.glob(os.path.join(carpeta, 'VentaHistorica[0-9][0-9][0-9][0-9].csv')))
+    return nombres
+
+
 def subir_ventas(conn, proveedor, carpeta, reemplazar=False):
     """
     Por defecto inserta o actualiza (upsert) y nunca borra. Con reemplazar=True,
     antes borra las ventas del proveedor en el rango de fechas que traen los CSV
     (todo en una sola transacción): así desaparecen las filas que ya no vienen
     del ERP (documentos anulados o líneas duplicadas por cargas anteriores).
+
+    Las ventas de años anteriores al actual van a ventas_historico (siempre en
+    modo reemplazo, porque esa tabla no tiene llave única). Cada fecha vive en
+    una sola tabla: al cargar un rango en una, se borra de la otra.
     """
     partes = []
-    for nombre in ['VentasActual.csv', 'VentaHistorica.csv']:
+    for nombre in _archivos_ventas(carpeta):
         df = _leer(os.path.join(carpeta, nombre), COLUMNAS_VENTAS)
         if df is not None:
             print(f'  {nombre}: {len(df):,} filas')
             partes.append(df)
     if not partes:
-        print('  (no se encontró VentasActual.csv ni VentaHistorica.csv, se omite)')
+        print('  (no se encontró VentasActual.csv ni VentaHistorica*.csv, se omite)')
         return
     df = pd.concat(partes, ignore_index=True)
     # Si la misma fila viene en los dos archivos (se solapan, es esperado),
@@ -144,6 +197,14 @@ def subir_ventas(conn, proveedor, carpeta, reemplazar=False):
     # protege, pero así evitamos mandar filas de más por la red.
     df = df.drop_duplicates(subset=['nro_documento', 'codigo_producto', 'numero_item'])
     df.insert(0, 'proveedor_codigo', proveedor)
+
+    anio_actual = datetime.now(ZoneInfo('America/Lima')).year
+    cerrado = df['fecha_documento'].str[:4].astype(int) < anio_actual
+    if cerrado.any():
+        _subir_historico(conn, proveedor, df[cerrado])
+    df = df[~cerrado]
+    if df.empty:
+        return
 
     cols = list(df.columns)
     valores = [tuple(r) for r in df.itertuples(index=False, name=None)]
@@ -154,8 +215,10 @@ def subir_ventas(conn, proveedor, carpeta, reemplazar=False):
         do update set {', '.join(f"{c} = excluded.{c}" for c in cols if c not in ('proveedor_codigo', 'nro_documento', 'codigo_producto', 'numero_item'))}
     """
     with conn.cursor() as cur:
+        desde, hasta = df['fecha_documento'].min(), df['fecha_documento'].max()
+        cur.execute('delete from ventas_historico where proveedor_codigo = %s and fecha_documento between %s and %s',
+                    (proveedor, desde, hasta))
         if reemplazar:
-            desde, hasta = df['fecha_documento'].min(), df['fecha_documento'].max()
             cur.execute('delete from ventas where proveedor_codigo = %s and fecha_documento between %s and %s',
                         (proveedor, desde, hasta))
             print(f'  -> {cur.rowcount:,} filas anteriores borradas ({desde} a {hasta}).')
@@ -175,6 +238,22 @@ def subir_ventas(conn, proveedor, carpeta, reemplazar=False):
             ''', (proveedor,))
     conn.commit()
     print(f'  -> {len(df):,} filas de venta sincronizadas (insertadas o actualizadas).')
+
+
+def _subir_historico(conn, proveedor, df):
+    """Ventas de años cerrados: reemplaza el rango de fechas en ventas_historico y lo quita de ventas."""
+    df = df[[c for c in COLUMNAS_HISTORICO if c in df.columns]]
+    desde, hasta = df['fecha_documento'].min(), df['fecha_documento'].max()
+    valores = [tuple(r) for r in df.itertuples(index=False, name=None)]
+    with conn.cursor() as cur:
+        cur.execute('delete from ventas_historico where proveedor_codigo = %s and fecha_documento between %s and %s',
+                    (proveedor, desde, hasta))
+        cur.execute('delete from ventas where proveedor_codigo = %s and fecha_documento between %s and %s',
+                    (proveedor, desde, hasta))
+        psycopg2.extras.execute_values(cur, f"insert into ventas_historico ({', '.join(df.columns)}) values %s",
+                                       valores, page_size=5000)
+    conn.commit()
+    print(f'  -> {len(df):,} filas de años anteriores en ventas_historico ({desde} a {hasta}).')
 
 
 def subir_stock(conn, proveedor, carpeta):

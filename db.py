@@ -156,8 +156,9 @@ SIN = {
     "linea": "SIN LÍNEA", "marca": "SIN MARCA",
 }
 
+# ventas_todo = ventas (año en curso) + ventas_historico (años cerrados, compacta).
 VENTAS_FROM = """
-    FROM public.ventas v
+    FROM public.ventas_todo v
     LEFT JOIN public.productos p
       ON p.proveedor_codigo = v.proveedor_codigo AND p.codigo_producto = v.codigo_producto
 """
@@ -257,8 +258,10 @@ def _where_stock(proveedor, filtros=()):
 @_cacheado
 def rango_disponible(proveedor):
     fila = _leer_uno("""
-        SELECT MIN(fecha_documento) AS desde, MAX(fecha_documento) AS hasta
-        FROM public.ventas WHERE proveedor_codigo = :proveedor
+        SELECT LEAST((SELECT MIN(fecha_documento) FROM public.ventas_historico WHERE proveedor_codigo = :proveedor),
+                     (SELECT MIN(fecha_documento) FROM public.ventas WHERE proveedor_codigo = :proveedor)) AS desde,
+               GREATEST((SELECT MAX(fecha_documento) FROM public.ventas_historico WHERE proveedor_codigo = :proveedor),
+                        (SELECT MAX(fecha_documento) FROM public.ventas WHERE proveedor_codigo = :proveedor)) AS hasta
     """, {"proveedor": proveedor})
     if not fila or fila["desde"] is None:
         return None, None
@@ -385,7 +388,7 @@ def agrupar_ventas(proveedor, campo, desde=None, hasta=None, top=None, filtros=(
 
     filas = _filas(f"""
         WITH vf AS (
-            SELECT {clave_sql} AS clave, v.codigo_cliente, v.descripcion_producto,
+            SELECT {clave_sql} AS clave, v.codigo_cliente, COALESCE(v.descripcion_producto, p.descripcion) AS descripcion_producto,
                    COALESCE(v.importe_neto_sin_impuesto, 0) AS importe,
                    COALESCE(v.cantidad_unidad_maxima, 0) AS cantidad
             {VENTAS_FROM}
@@ -430,18 +433,19 @@ def variacion_por_dimension(proveedor, ant_desde, ant_hasta, corte, hasta, filtr
     """
     Venta y clientes de cada valor de cada dimensión en dos períodos
     (anterior: ant_desde..ant_hasta, actual: corte..hasta), en una sola lectura.
-    Los períodos pueden no ser seguidos (1–2 oct vs 1–2 nov). Sirve para
-    explicar qué canal, supervisor, producto, etc. movió el total.
+    Los períodos pueden no ser seguidos (nov 2025 vs nov 2026): se leen solo
+    esos dos tramos. Sirve para explicar qué canal, supervisor, producto, etc.
+    movió el total.
     """
-    where, params = _where_ventas(proveedor, ant_desde, hasta, filtros)
-    where += " AND (v.fecha_documento >= :corte OR v.fecha_documento <= :ant_hasta)"
-    params["corte"] = corte
-    params["ant_hasta"] = ant_hasta
+    where, params = _where_ventas(proveedor, None, None, filtros)
+    where += (" AND (v.fecha_documento BETWEEN :corte AND :hasta"
+              " OR v.fecha_documento BETWEEN :ant_desde AND :ant_hasta)")
+    params.update(corte=corte, hasta=hasta, ant_desde=ant_desde, ant_hasta=ant_hasta)
     pares = ", ".join(f"('{d}', vf.{d}::text)" for d in DIM_VARIACION)
     return _filas(f"""
         WITH vf AS (
             SELECT v.fecha_documento >= :corte AS actual, v.codigo_cliente,
-                   v.descripcion_producto,
+                   COALESCE(v.descripcion_producto, p.descripcion) AS descripcion_producto,
                    COALESCE(v.importe_neto_sin_impuesto, 0) AS importe,
                    {', '.join(f'{DIM_VENTAS[d]} AS {d}' for d in DIM_VARIACION)}
             {VENTAS_FROM}
@@ -457,6 +461,119 @@ def variacion_por_dimension(proveedor, ant_desde, ant_hasta, corte, hasta, filtr
         WHERE d.clave IS NOT NULL
         GROUP BY 1, 2
     """, params)
+
+
+# ---------------------------------------------------------------------------
+#  Segmentación de clientes A–E (requerimiento 8 de PEUSAC, nov 2026)
+# ---------------------------------------------------------------------------
+# Compra mensual (venta neta sin IGV) desde la que empieza cada segmento;
+# cada rango incluye su valor inicial (S/ 80 exactos es B). Solo entran los
+# clientes con venta neta > 0, igual que en la cobertura.
+SEGMENTOS = (("A", 120), ("B", 80), ("C", 50), ("D", 30), ("E", 0))
+DIM_SEGMENTOS = ("sede", "distrito", "canal", "tipo_negocio", "supervisor", "jefe_ventas")
+
+
+def _sql_segmento(columna):
+    casos = " ".join(f"WHEN {columna} >= {desde} THEN '{s}'" for s, desde in SEGMENTOS[:-1])
+    return f"CASE {casos} ELSE '{SEGMENTOS[-1][0]}' END"
+
+
+def _meses_periodo(desde, hasta):
+    """Meses calendario que toca el período: la compra mensual es venta ÷ meses."""
+    if not desde or not hasta:
+        return 1
+    d, h = str(desde), str(hasta)
+    return max(1, (int(h[:4]) - int(d[:4])) * 12 + int(h[5:7]) - int(d[5:7]) + 1)
+
+
+def _clientes_segmentados(where):
+    """
+    CTE con una fila por cliente: venta, compra mensual, segmento y su sede,
+    distrito, canal, etc. Si el cliente compró en más de una sede (o con más
+    de un supervisor), se le asigna la combinación donde más compró.
+    """
+    dims = ", ".join(f"{DIM_VENTAS[d]} AS {d}" for d in DIM_SEGMENTOS)
+    lista = ", ".join(DIM_SEGMENTOS)
+    return f"""
+        vf AS (
+            SELECT v.codigo_cliente, COALESCE(v.importe_neto_sin_impuesto, 0) AS importe,
+                   v.codigo_producto, v.nro_documento, v.tipo_documento, {dims}
+            {VENTAS_FROM}
+            WHERE {where} AND v.codigo_cliente IS NOT NULL
+        ), totales AS (
+            SELECT codigo_cliente, SUM(importe) AS venta,
+                   COUNT(DISTINCT codigo_producto) AS skus,
+                   COUNT(DISTINCT nro_documento) FILTER (WHERE tipo_documento IS DISTINCT FROM 'NC') AS documentos
+            FROM vf GROUP BY codigo_cliente
+            HAVING SUM(importe) > 0
+        ), principal AS (
+            SELECT DISTINCT ON (codigo_cliente) codigo_cliente, {lista}
+            FROM (SELECT codigo_cliente, {lista}, SUM(importe) AS venta
+                  FROM vf GROUP BY codigo_cliente, {lista}) x
+            ORDER BY codigo_cliente, venta DESC
+        ), clientes AS (
+            SELECT t.codigo_cliente, t.venta, t.skus, t.documentos,
+                   t.venta / :meses AS mensual,
+                   {_sql_segmento('t.venta / :meses')} AS segmento,
+                   {', '.join(f'p.{d}' for d in DIM_SEGMENTOS)}
+            FROM totales t JOIN principal p USING (codigo_cliente)
+        )"""
+
+
+@_cacheado
+def segmentos(proveedor, desde, hasta, filtros=(), dimension="sede"):
+    """Clientes y venta por segmento, en total y por la dimensión elegida."""
+    if dimension not in DIM_SEGMENTOS:
+        raise ValueError("Dimensión de segmentación no permitida")
+    where, params = _where_ventas(proveedor, desde, hasta, filtros)
+    params["meses"] = _meses_periodo(desde, hasta)
+    filas = _filas(f"""
+        WITH {_clientes_segmentados(where)}
+        SELECT {dimension}::text AS clave, segmento,
+               COUNT(*)::bigint AS clientes,
+               SUM(venta)::double precision AS venta
+        FROM clientes GROUP BY 1, 2
+    """, params)
+    return {
+        "meses": params["meses"],
+        "rangos": [{"segmento": s, "desde": d} for s, d in SEGMENTOS],
+        "filas": [{"clave": f["clave"], "segmento": f["segmento"], "clientes": int(f["clientes"]),
+                   "venta": float(f["venta"] or 0)} for f in filas],
+    }
+
+
+COLUMNAS_SEGMENTO_CLIENTES = ("codigo_cliente", "segmento", "mensual", "venta", "skus", "documentos") + DIM_SEGMENTOS
+
+
+@_cacheado
+def clientes_segmento(proveedor, desde, hasta, filtros=(), segmento=None, limite=None):
+    """
+    Listado de clientes con su segmento (todos o solo uno), de mayor a menor
+    compra. La pantalla pide solo los primeros (limite): traer los ~16 mil
+    clientes de Supabase tarda mucho más que calcularlos; el listado completo
+    es para la descarga.
+    """
+    where, params = _where_ventas(proveedor, desde, hasta, filtros)
+    params["meses"] = _meses_periodo(desde, hasta)
+    filtro = limite_sql = ""
+    if segmento:
+        if segmento not in {s for s, _ in SEGMENTOS}:
+            raise ValueError("Segmento no permitido")
+        filtro = "WHERE segmento = :segmento"
+        params["segmento"] = segmento
+    if limite:
+        limite_sql = "LIMIT :limite"
+        params["limite"] = int(limite)
+    filas = _filas(f"""
+        WITH {_clientes_segmentados(where)}
+        SELECT {', '.join(COLUMNAS_SEGMENTO_CLIENTES)} FROM clientes {filtro}
+        ORDER BY mensual DESC {limite_sql}
+    """, params)
+    for f in filas:
+        for c in ("mensual", "venta"):
+            f[c] = round(float(f[c] or 0), 2)
+        f["skus"], f["documentos"] = int(f["skus"] or 0), int(f["documentos"] or 0)
+    return filas
 
 
 # ---------------------------------------------------------------------------
@@ -647,7 +764,7 @@ EXPORT_VENTAS = [
     ("categoria", "p.categoria"),
     ("codigo_proveedor", "p.codigo_proveedor"),
     ("codigo_producto", "v.codigo_producto"),
-    ("descripcion_producto", "v.descripcion_producto"),
+    ("descripcion_producto", "COALESCE(v.descripcion_producto, p.descripcion)"),
     ("cantidad_unidad_minima", "v.cantidad_unidad_minima"),
     ("tipo_unidad_minima", "v.tipo_unidad_minima"),
     ("cantidad_unidad_maxima", "v.cantidad_unidad_maxima"),

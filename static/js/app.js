@@ -12,6 +12,9 @@ const nf1 = new Intl.NumberFormat('es-PE', { maximumFractionDigits: 1, minimumFr
 const fmt = n => nf0.format(Math.round(n || 0));
 const fmt1 = n => nf1.format(n || 0);
 const money = n => 'S/ ' + fmt(n);
+// Con céntimos: en segmentos, S/ 119.68 es B y no debe verse como "S/ 120".
+const nf2 = new Intl.NumberFormat('es-PE', { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+const money2 = n => 'S/ ' + nf2.format(n || 0);
 function compact(n, pre = '') {
   const a = Math.abs(n || 0);
   if (a >= 1e6) return pre + nf1.format(n / 1e6) + ' M';
@@ -30,6 +33,16 @@ const mesLabel = k => { const [y, m] = k.split('-'); return `${MESES[+m - 1]} ${
 const fechaCorta = iso => { const [, m, d] = iso.split('-'); return `${+d} ${MESES[+m - 1]}`; };
 const ISO = d => d.toISOString().slice(0, 10);
 const addDays = (iso, n) => { const d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return ISO(d); };
+const finDeMes = ym => ISO(new Date(Date.UTC(+ym.slice(0, 4), +ym.slice(5, 7), 0)));
+const sumarMeses = (ym, n) => ISO(new Date(Date.UTC(+ym.slice(0, 4), +ym.slice(5, 7) - 1 + n, 1))).slice(0, 7);
+const mesLargo = ym => `${MESES[+ym.slice(5, 7) - 1]} ${ym.slice(0, 4)}`;
+// "nov 2025" si el período son meses completos; si no, "1 nov – 17 nov 2025".
+function etiquetaPeriodo(ini, fin) {
+  if (ini.slice(8) === '01' && fin === finDeMes(fin.slice(0, 7))) {
+    return ini.slice(0, 7) === fin.slice(0, 7) ? mesLargo(ini) : `${mesLargo(ini)} – ${mesLargo(fin)}`;
+  }
+  return `${fechaCorta(ini)} – ${fechaCorta(fin)} ${fin.slice(0, 4)}`;
+}
 
 const PAL = ['#e30613', '#2563eb', '#12a37a', '#f59e0b', '#7c5cff', '#0891b2', '#ec4899', '#84cc16', '#64748b', '#0f172a'];
 
@@ -173,7 +186,8 @@ const TABS = [
   { id: 'resumen', label: 'Resumen', ic: 'layout-dashboard', sub: 'Indicadores principales del período' },
   { id: 'ventas', label: 'Análisis de ventas', ic: 'chart-column-big', sub: 'Explora la venta por cualquier dimensión' },
   { id: 'inventario', label: 'Inventario', ic: 'warehouse', sub: 'Foto del stock, sincronizada cada hora' },
-  { id: 'dias', label: 'Días de inventario', ic: 'hourglass', sub: 'Cuántos días alcanza el stock con la venta actual', nuevo: true },
+  { id: 'segmentos', label: 'Segmentos de clientes', ic: 'medal', sub: 'Clientes A–E según su compra mensual', nuevo: true },
+  { id: 'dias', label: 'Días de inventario', ic: 'hourglass', sub: 'Cuántos días alcanza el stock con la venta actual' },
   { id: 'paquete', label: 'Descargas', ic: 'download', sub: 'Reportes de ventas y stock listos para Excel' },
 ];
 
@@ -196,7 +210,9 @@ const SIN_DATO = /^SIN /;
 
 let TAB = 'resumen';
 let RANGO = { min: null, max: null };
-let FECHAS = { ini: null, fin: null, preset: 'todo' };
+// El período se elige por meses (pedido PEUSAC, nov 2026); FECHAS guarda el
+// primer y último día con datos de esos meses, que es lo que recibe la API.
+let FECHAS = { ini: null, fin: null, desde: null, hasta: null, preset: 'mes' };
 let SEL = {};              // { campo: [valores] }
 let OPC = {};              // opciones de cada filtro (desde /api/filtros)
 let ABIERTO = null;        // filtro desplegado
@@ -220,26 +236,31 @@ const hayFiltros = () => Object.values(SEL).some(v => v.length);
 //  Barra de filtros
 // ---------------------------------------------------------------------
 const PRESETS = [
-  { k: 'mes', l: 'Este mes' }, { k: 'mesant', l: 'Mes anterior' }, { k: '30d', l: '30 días' },
-  { k: '90d', l: '90 días' }, { k: 'anio', l: 'Año' }, { k: 'todo', l: 'Todo' },
+  { k: 'mes', l: 'Este mes' }, { k: 'mesant', l: 'Mes anterior' },
+  { k: '3m', l: 'Últimos 3 meses' }, { k: 'anio', l: 'Año en curso' },
 ];
-function aplicarPreset(k) {
-  const fin = RANGO.max, y = fin.slice(0, 4), m = fin.slice(5, 7);
-  const recorta = d => (d < RANGO.min ? RANGO.min : d);
-  let ini = RANGO.min, hasta = fin;
-  if (k === 'mes') ini = `${y}-${m}-01`;
-  if (k === 'mesant') { ini = ISO(new Date(Date.UTC(+y, +m - 2, 1))); hasta = addDays(`${y}-${m}-01`, -1); }
-  if (k === '30d') ini = addDays(fin, -29);
-  if (k === '90d') ini = addDays(fin, -89);
-  if (k === 'anio') ini = `${y}-01-01`;
-  FECHAS = { ini: recorta(ini), fin: hasta, preset: k };
+function mesesDisponibles() {
+  const lista = [];
+  for (let ym = RANGO.min.slice(0, 7); ym <= RANGO.max.slice(0, 7); ym = sumarMeses(ym, 1)) lista.push(ym);
+  return lista.reverse();
+}
+function aplicarMeses(desde, hasta, preset = null) {
+  if (desde > hasta) [desde, hasta] = [hasta, desde];
+  const ini = `${desde}-01`, fin = finDeMes(hasta);
+  FECHAS = { desde, hasta, preset, ini: ini < RANGO.min ? RANGO.min : ini, fin: fin > RANGO.max ? RANGO.max : fin };
   render();
 }
-function cambiarFecha(campo, valor) {
-  if (!valor) return;
-  FECHAS[campo] = valor; FECHAS.preset = null;
-  if (FECHAS.ini > FECHAS.fin) [FECHAS.ini, FECHAS.fin] = [FECHAS.fin, FECHAS.ini];
-  render();
+function aplicarPreset(k) {
+  const ult = RANGO.max.slice(0, 7);
+  if (k === 'mes') aplicarMeses(ult, ult, k);
+  if (k === 'mesant') aplicarMeses(sumarMeses(ult, -1), sumarMeses(ult, -1), k);
+  if (k === '3m') aplicarMeses(sumarMeses(ult, -2), ult, k);
+  if (k === 'anio') aplicarMeses(`${ult.slice(0, 4)}-01`, ult, k);
+}
+function cambiarMes(campo, ym) {
+  if (!ym) return;
+  const sel = { desde: FECHAS.desde, hasta: FECHAS.hasta, [campo]: ym };
+  aplicarMeses(sel.desde, sel.hasta);
 }
 
 function opcionesDe(k) {
@@ -270,9 +291,9 @@ function renderFiltros() {
     <div class="fb-row">
       <div class="fb-dates" style="${usaFechas ? '' : apagado}" title="${usaFechas ? '' : 'El inventario es una foto actual: no depende de fechas'}">
         ${icon('calendar-days')}
-        <input type="date" value="${FECHAS.ini}" min="${RANGO.min}" max="${RANGO.max}" onchange="cambiarFecha('ini', this.value)">
+        <select onchange="cambiarMes('desde', this.value)" aria-label="Mes inicial">${opcionesMes(FECHAS.desde)}</select>
         <span>→</span>
-        <input type="date" value="${FECHAS.fin}" min="${RANGO.min}" max="${RANGO.max}" onchange="cambiarFecha('fin', this.value)">
+        <select onchange="cambiarMes('hasta', this.value)" aria-label="Mes final">${opcionesMes(FECHAS.hasta)}</select>
       </div>
       <div class="presets" style="${usaFechas ? '' : apagado}">${PRESETS.map(p => `<button class="${FECHAS.preset === p.k ? 'on' : ''}" onclick="aplicarPreset('${p.k}')">${p.l}</button>`).join('')}</div>
       <div class="fb-sep"></div>
@@ -283,6 +304,8 @@ function renderFiltros() {
   const buscador = el.querySelector('.fpop-search input');
   if (buscador) buscador.focus();
 }
+
+const opcionesMes = actual => mesesDisponibles().map(ym => `<option value="${ym}" ${ym === actual ? 'selected' : ''}>${mesLargo(ym)}</option>`).join('');
 
 function popFiltro(f) {
   const ops = opcionesDe(f.k);
@@ -390,7 +413,7 @@ async function render() {
   document.getElementById('pageTitle').textContent = tab.label;
   document.getElementById('crumb').textContent = tab.sub;
   renderFiltros();
-  const vistas = { resumen: vistaResumen, ventas: vistaVentas, inventario: vistaInventario, dias: vistaDias, paquete: vistaPaquete };
+  const vistas = { resumen: vistaResumen, ventas: vistaVentas, inventario: vistaInventario, segmentos: vistaSegmentos, dias: vistaDias, paquete: vistaPaquete };
   try {
     await vistas[TAB](() => id === RENDER_ID);
   } catch (e) {
@@ -402,23 +425,21 @@ async function render() {
 }
 const pintar = (vigente, html) => { if (!vigente()) return false; document.getElementById('view').innerHTML = html; icons(); return true; };
 
-// Período de comparación (mismo criterio que hallazgos.periodo_anterior):
-// - Mes en curso (desde el día 1, dentro de un mismo mes): mismos días del mes
-//   anterior. 1–2 nov se compara con 1–2 oct, no con 30–31 oct.
-// - Cualquier otro rango: los mismos días inmediatamente anteriores.
-function rangoAnterior(ini, fin) {
-  const dias = Math.round((new Date(fin) - new Date(ini)) / 864e5) + 1;
-  if (ini.slice(8) === '01' && ini.slice(0, 7) === fin.slice(0, 7)) {
-    const [y, m] = ini.split('-').map(Number);
-    const inicioAnt = ISO(new Date(Date.UTC(y, m - 2, 1)));
-    const ultimoAnt = addDays(ini, -1);                       // último día del mes anterior
-    const finAnt = inicioAnt.slice(0, 8) + fin.slice(8);
-    return { ini: inicioAnt, fin: finAnt > ultimoAnt ? ultimoAnt : finAnt, dias, mismoTramo: true };
-  }
-  const finAnt = addDays(ini, -1);
-  return { ini: addDays(finAnt, -(dias - 1)), fin: finAnt, dias };
+// Período de comparación (mismo criterio que hallazgos.periodo_anterior): las
+// mismas fechas del año anterior. Nov 2026 vs nov 2025; con el mes en curso,
+// los mismos días (1–17 nov 2026 vs 1–17 nov 2025).
+function menosUnAnio(iso) {
+  const y = +iso.slice(0, 4) - 1, md = iso.slice(5);
+  return md === '02-29' ? `${y}-02-28` : `${y}-${md}`;
+}
+const rangoAnterior = (ini, fin) => ({ ini: menosUnAnio(ini), fin: menosUnAnio(fin) });
+// Une las filas del año anterior a las del período por la misma clave.
+function conAnterior(filas, filasAnt) {
+  const ant = new Map((filasAnt || []).map(f => [f.clave, f]));
+  return filas.map(f => ({ ...f, venta_ant: ant.get(f.clave)?.venta || 0, cobertura_ant: ant.get(f.clave)?.cobertura || 0 }));
 }
 const delta = (a, b) => (b ? ((a - b) / b) * 100 : null);
+const variacionCelda = d => d == null ? '—' : deltaHtml(d);
 
 function avisoDatosNuevos() {
   if (!Object.keys(OPC).length) return '';
@@ -472,7 +493,7 @@ async function cargarHallazgos(vigente, promesa) {
   }).join('');
   caja.innerHTML = `<div class="card hz">
     <div class="hz-head"><span class="ic">${icon('sparkles')}</span>
-      <div style="flex:1"><h3>Hallazgos del período</h3><small>${fechaCorta(d.periodo.desde)} al ${fechaCorta(d.periodo.hasta)} · comparado con ${fechaCorta(d.periodo.ant_desde)} al ${fechaCorta(d.periodo.ant_hasta)}${hayFiltros() ? ' · con tus filtros' : ''}</small></div>
+      <div style="flex:1"><h3>Hallazgos del período</h3><small>${etiquetaPeriodo(d.periodo.desde, d.periodo.hasta)} · comparado con ${etiquetaPeriodo(d.periodo.ant_desde, d.periodo.ant_hasta)}${hayFiltros() ? ' · con tus filtros' : ''}</small></div>
       ${d.alertas ? `<span class="tag t-red">${d.alertas} alerta${d.alertas > 1 ? 's' : ''}</span>` : '<span class="tag t-green">Sin alertas</span>'}</div>
     <p class="hz-txt">${texto}</p>
     <div class="hz-list">${items || '<div class="sub">No hay cambios relevantes en este período.</div>'}</div>
@@ -503,6 +524,32 @@ function dibujarCanal() {
   if (seg) seg.outerHTML = segMetrica('MIX_CANAL', MIX_CANAL, 'dibujarCanal()');
 }
 
+// "Venta por sede": período elegido frente al mismo período del año anterior,
+// en soles o en clientes (cobertura).
+let SEDE_MET = 'venta';
+let DATOS_SEDE = null;
+function dibujarSede() {
+  if (!DATOS_SEDE) return;
+  const { filas, actual, anterior } = DATOS_SEDE;
+  const enClientes = SEDE_MET === 'cobertura';
+  const fmtV = enClientes ? v => fmt(v) + ' clientes' : money;
+  chart('c_sede', {
+    type: 'bar',
+    data: {
+      labels: filas.map(f => f.clave), datasets: [
+        { label: actual, data: filas.map(f => Math.round(enClientes ? f.cobertura : f.venta)), backgroundColor: PAL[4], borderRadius: 5, maxBarThickness: 16 },
+        { label: anterior, data: filas.map(f => Math.round(enClientes ? f.cobertura_ant : f.venta_ant)), backgroundColor: '#c9bdfd', borderRadius: 5, maxBarThickness: 16 }]
+    },
+    options: {
+      indexAxis: 'y',
+      plugins: { tooltip: { callbacks: { label: c => ` ${c.dataset.label}: ${fmtV(c.raw)}`, afterBody: it => { const f = filas[it[0].dataIndex]; const d = delta(enClientes ? f.cobertura : f.venta, enClientes ? f.cobertura_ant : f.venta_ant); return d == null ? '' : ` Variación: ${d >= 0 ? '+' : '−'}${fmt1(Math.abs(d))}%`; } } } },
+      scales: { x: { ticks: { callback: v => compact(v) }, grid: { color: '#f1f3f8' } }, y: { grid: { display: false }, ticks: { autoSkip: false } } }
+    }
+  });
+  const seg = document.getElementById('c_sede')?.closest('.card')?.querySelector('.card-h .seg');
+  if (seg) seg.outerHTML = segMetrica('SEDE_MET', SEDE_MET, 'dibujarSede()');
+}
+
 // =======================================================================
 //  RESUMEN
 // =======================================================================
@@ -511,7 +558,7 @@ async function vistaResumen(vigente) {
   const hzPromesa = api('/api/hallazgos' + qs()).catch(() => null);
   const ant = rangoAnterior(FECHAS.ini, FECHAS.fin);
   const historia = qs({ desde: RANGO.min, hasta: RANGO.max }, { fechas: false });
-  const [r, rAnt, mes, semana, canal, dia, prod, sede, cat, diasInv] = await Promise.all([
+  const [r, rAnt, mes, semana, canal, dia, prod, sede, sedeAnt, cat, diasInv] = await Promise.all([
     api('/api/resumen' + qs()),
     api('/api/resumen' + qs({ desde: ant.ini, hasta: ant.fin }, { fechas: false })).catch(() => null),
     api('/api/agrupado/mes' + historia),
@@ -520,6 +567,7 @@ async function vistaResumen(vigente) {
     api('/api/agrupado/dia_semana' + qs()),
     api('/api/agrupado/codigo_producto' + qs({ top: 10 })),
     api('/api/agrupado/sede' + qs()),
+    api('/api/agrupado/sede' + qs({ desde: ant.ini, hasta: ant.fin }, { fechas: false })).catch(() => []),
     api('/api/agrupado/categoria' + qs()),
     api('/api/dias_inventario' + qs({ dias: DIAS_CFG.periodo }, { fechas: false, soloStock: true })).catch(() => []),
   ]);
@@ -527,14 +575,14 @@ async function vistaResumen(vigente) {
   if (diasInv.length) FUENTE_DIAS = diasInv[0].fuente;
   const totalDias = agruparDias(diasInv, 'total')[0];
   const diasStock = totalDias && r.cajas_stock > 0 ? totalDias.dias : null;
-  const vsTxt = `vs ${fechaCorta(ant.ini)} – ${fechaCorta(ant.fin)}`;
+  const vsTxt = `vs ${etiquetaPeriodo(ant.ini, ant.fin)}`;
 
   const ok = pintar(vigente, `
     <div id="hz"><div class="sk" style="height:230px;border-radius:16px;margin-bottom:1rem"></div></div>
     ${avisoDatosNuevos()}
     <div class="grid g-kpi">
       ${kpi('Venta neta s/IGV', moneyC(r.venta_neta), vsTxt, { ic: 'banknote', hero: true, delta: delta(r.venta_neta, a.venta_neta) })}
-      ${kpi('Cobertura', fmt(r.cobertura), 'clientes con compra', { ic: 'users-round', tono: 't-blue', delta: delta(r.cobertura, a.cobertura) })}
+      ${kpi('Cobertura', fmt(r.cobertura), `clientes · ${vsTxt}`, { ic: 'users-round', tono: 't-blue', delta: delta(r.cobertura, a.cobertura) })}
       ${kpi('Cajas vendidas', fmt(r.cajas), `${fmt1(r.cajas_diarias)} cajas por día`, { ic: 'boxes', tono: 't-green', delta: delta(r.cajas, a.cajas) })}
       ${kpi('Documentos', fmt(r.documentos), 'boletas y facturas', { ic: 'receipt-text', tono: 't-violet', delta: delta(r.documentos, a.documentos) })}
       ${kpi('Ticket promedio', money(r.ticket_documento), 'venta ÷ documentos', { ic: 'ticket', tono: 't-amber', delta: delta(r.ticket_documento, a.ticket_documento) })}
@@ -556,7 +604,7 @@ async function vistaResumen(vigente) {
         prod.map((p, i) => [i + 1, `<b>${esc(p.descripcion)}</b><span class="muted">${esc(p.clave)}</span>`, p.venta, pct(p.venta, r.venta_neta), p.cajas, p.cobertura])
       ), { ic: 'trophy', sub: 'Por venta neta en el período', tono: 't-amber' })}
       <div style="display:grid;gap:1rem">
-        ${card('Venta por sede', chWrap('c_sede', 'sm'), { ic: 'building-2', tono: 't-violet' })}
+        ${card('Venta por sede', chWrap('c_sede', 'sm'), { ic: 'building-2', tono: 't-violet', sub: 'vs año anterior', extra: segMetrica('SEDE_MET', SEDE_MET, 'dibujarSede()') })}
         ${card('Venta por categoría', chWrap('c_cat', 'sm'), { ic: 'tags', tono: 't-cyan' })}
       </div>
     </div>`);
@@ -585,7 +633,8 @@ async function vistaResumen(vigente) {
     data: { labels: diaOrd.map(d => DIAS_SEM[+d.clave].slice(0, 3)), datasets: [{ label: 'Venta S/', data: diaOrd.map(d => Math.round(d.venta)), backgroundColor: PAL[3], borderRadius: 8 }] },
     options: { plugins: { legend: { display: false } }, scales: { y: { ticks: tickMoney }, x: { grid: { display: false } } } }
   });
-  barrasH('c_sede', sede.slice(0, 8).map(s => s.clave), sede.slice(0, 8).map(s => Math.round(s.venta)), { color: PAL[4] });
+  DATOS_SEDE = { filas: conAnterior(sede.slice(0, 8), sedeAnt), actual: etiquetaPeriodo(FECHAS.ini, FECHAS.fin), anterior: etiquetaPeriodo(ant.ini, ant.fin) };
+  dibujarSede();
   barrasH('c_cat', cat.slice(0, 8).map(s => s.clave), cat.slice(0, 8).map(s => Math.round(s.venta)), { color: PAL[5] });
 }
 
@@ -610,7 +659,8 @@ let EXP = { dim: 'canal', orden: 'venta', top: 25 };
 
 async function vistaVentas(vigente) {
   const d = DIMENSIONES.find(x => x.k === EXP.dim);
-  const cabecera = `<div class="pagehead"><div><h2>Venta por ${d.l.toLowerCase()}</h2><div class="sub">${fechaCorta(FECHAS.ini)} al ${fechaCorta(FECHAS.fin)} ${FECHAS.fin.slice(0, 4)}${hayFiltros() ? ' · con filtros aplicados' : ''}</div></div>
+  const ant = rangoAnterior(FECHAS.ini, FECHAS.fin);
+  const cabecera = `<div class="pagehead"><div><h2>Venta por ${d.l.toLowerCase()}</h2><div class="sub">${etiquetaPeriodo(FECHAS.ini, FECHAS.fin)} · comparado con ${etiquetaPeriodo(ant.ini, ant.fin)}${hayFiltros() ? ' · con filtros aplicados' : ''}</div></div>
       <div style="display:flex;gap:.5rem;flex-wrap:wrap">
         <select class="sel" onchange="EXP.orden=this.value;render()">${[['venta', 'Ordenar por venta'], ['cobertura', 'Ordenar por clientes'], ['cajas', 'Ordenar por cajas']].map(([k, l]) => `<option value="${k}" ${EXP.orden === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
         <select class="sel" onchange="EXP.top=+this.value;render()">${[10, 25, 50, 0].map(n => `<option value="${n}" ${EXP.top === n ? 'selected' : ''}>${n ? 'Top ' + n : 'Todos'}</option>`).join('')}</select>
@@ -619,11 +669,14 @@ async function vistaVentas(vigente) {
   document.getElementById('view').innerHTML = cabecera + skKpis(4) + skCharts();
   icons();
 
-  const [r, filas, mes] = await Promise.all([
+  const [r, filasAct, filasAnt, mes] = await Promise.all([
     api('/api/resumen' + qs()),
     api(`/api/agrupado/${EXP.dim}` + qs({ orden: EXP.orden, top: EXP.top || null })),
+    api(`/api/agrupado/${EXP.dim}` + qs({ desde: ant.ini, hasta: ant.fin }, { fechas: false })).catch(() => []),
     api('/api/agrupado/mes' + qs({ desde: RANGO.min, hasta: RANGO.max }, { fechas: false })),
   ]);
+  const filas = conAnterior(filasAct, filasAnt);
+  const anioAnt = etiquetaPeriodo(ant.ini, ant.fin);
   const enClientes = EXP.orden === 'cobertura';
   const metrica = enClientes ? 'cobertura' : 'venta';
   const es = EXP.dim === 'codigo_producto';
@@ -645,9 +698,9 @@ async function vistaVentas(vigente) {
       ${card('Participación', chWrap('c_part', 'lg'), { ic: 'chart-pie', sub: enClientes ? 'En los clientes' : 'En la venta neta', tono: 't-blue' })}
     </div>
     ${card('Detalle', table(
-      [{ h: '#', f: v => `<span class="rank">${v}</span>` }, { h: d.l, f: v => v }, { h: 'Venta', n: 1, f: money }, { h: 'Participación', f: v => `<div style="display:flex;gap:.5rem;align-items:center">${barra(v)}<small>${fmt1(v)}%</small></div>` }, { h: 'Cajas', n: 1, f: fmt }, { h: 'Clientes', n: 1, f: fmt }, { h: 'Venta / cliente', n: 1, f: money }],
-      filas.map((f, i) => [i + 1, es ? `<b>${esc(f.descripcion)}</b><span class="muted">${esc(f.clave)}</span>` : `<b>${esc(f.clave)}</b>`, f.venta, pct(f.venta, r.venta_neta), f.cajas, f.cobertura, f.cobertura ? f.venta / f.cobertura : 0])
-    ), { ic: 'table-2', sub: `${filas.length} filas`, tono: 't-slate' })}`);
+      [{ h: '#', f: v => `<span class="rank">${v}</span>` }, { h: d.l, f: v => v }, { h: 'Venta', n: 1, f: money }, { h: 'Venta año ant.', n: 1, f: money }, { h: 'Var. venta', n: 1, f: variacionCelda }, { h: 'Participación', f: v => `<div style="display:flex;gap:.5rem;align-items:center">${barra(v)}<small>${fmt1(v)}%</small></div>` }, { h: 'Cajas', n: 1, f: fmt }, { h: 'Clientes', n: 1, f: fmt }, { h: 'Clientes año ant.', n: 1, f: fmt }, { h: 'Var. clientes', n: 1, f: variacionCelda }, { h: 'Venta / cliente', n: 1, f: money }],
+      filas.map((f, i) => [i + 1, es ? `<b>${esc(f.descripcion)}</b><span class="muted">${esc(f.clave)}</span>` : `<b>${esc(f.clave)}</b>`, f.venta, f.venta_ant, delta(f.venta, f.venta_ant), pct(f.venta, r.venta_neta), f.cajas, f.cobertura, f.cobertura_ant, delta(f.cobertura, f.cobertura_ant), f.cobertura ? f.venta / f.cobertura : 0])
+    ), { ic: 'table-2', sub: `${filas.length} filas · año anterior = ${anioAnt}`, tono: 't-slate' })}`);
   if (!ok) return;
 
   const top15 = filas.slice(0, 15);
@@ -739,6 +792,89 @@ async function vistaInventario(vigente) {
   barrasH('c_alm', s.por_almacen.map(a => a.clave), s.por_almacen.map(a => Math.round(a.valor)), { color: PAL[0] });
   const c = topMasOtros(s.por_categoria.map(x => ({ clave: x.clave, venta: x.valor })));
   dona('c_icat', c.map(x => x.clave), c.map(x => Math.round(x.venta)), moneyC(s.valor_stock), 'valor total');
+}
+
+// =======================================================================
+//  SEGMENTOS DE CLIENTES A–E (requerimiento 8 de PEUSAC). El segmento lo
+//  calcula db.segmentos: venta neta del período ÷ meses, por cliente.
+// =======================================================================
+const SEG_COLOR = { A: '#12a37a', B: '#2563eb', C: '#7c5cff', D: '#f59e0b', E: '#94a3b8' };
+const SEG_DESC = { A: 'Clientes clave', B: 'Clientes fuertes', C: 'Clientes medios', D: 'Clientes promedio', E: 'Clientes pequeños' };
+const SEG_DIMS = [
+  { k: 'sede', l: 'Sede', ic: 'building-2' }, { k: 'distrito', l: 'Distrito', ic: 'map-pin' },
+  { k: 'canal', l: 'Canal', ic: 'store' }, { k: 'tipo_negocio', l: 'Tipo de negocio', ic: 'shopping-basket' },
+  { k: 'supervisor', l: 'Supervisor', ic: 'users' }, { k: 'jefe_ventas', l: 'Jefe de ventas', ic: 'user-cog' },
+];
+let SEG_CFG = { dim: 'sede', segmento: '' };
+
+function rangoSegmento(rangos, s) {
+  const i = rangos.findIndex(r => r.segmento === s);
+  const desde = rangos[i].desde, hasta = i > 0 ? rangos[i - 1].desde : null;
+  if (!hasta) return `desde S/ ${desde}`;
+  return desde ? `S/ ${desde} a menos de S/ ${hasta}` : `menos de S/ ${hasta}`;
+}
+
+async function vistaSegmentos(vigente) {
+  const dim = SEG_DIMS.find(x => x.k === SEG_CFG.dim);
+  document.getElementById('view').innerHTML = skKpis(5) + skCharts('g-2', 1);
+  const [d, lista] = await Promise.all([
+    api('/api/segmentos' + qs({ dim: SEG_CFG.dim })),
+    api('/api/segmentos/clientes' + qs({ segmento: SEG_CFG.segmento })),
+  ]);
+  const letras = d.rangos.map(r => r.segmento);
+  const total = { clientes: 0, venta: 0 };
+  const porSeg = Object.fromEntries(letras.map(s => [s, { clientes: 0, venta: 0 }]));
+  const porClave = new Map();
+  d.filas.forEach(f => {
+    porSeg[f.segmento].clientes += f.clientes; porSeg[f.segmento].venta += f.venta;
+    total.clientes += f.clientes; total.venta += f.venta;
+    const g = porClave.get(f.clave) || { clave: f.clave, total: 0 };
+    g[f.segmento] = (g[f.segmento] || 0) + f.clientes; g.total += f.clientes;
+    porClave.set(f.clave, g);
+  });
+  const grupos = [...porClave.values()].sort((a, b) => b.total - a.total);
+  const totalLista = SEG_CFG.segmento ? porSeg[SEG_CFG.segmento].clientes : total.clientes;
+  const periodo = etiquetaPeriodo(FECHAS.ini, FECHAS.fin);
+  const base = d.meses > 1 ? `promedio mensual de ${periodo} (venta ÷ ${d.meses} meses)` : `compra de ${periodo}`;
+
+  const ok = pintar(vigente, `
+    ${nota(`Cada cliente se clasifica por su <b>venta neta sin IGV</b> (${base}): ${letras.map(s => `<b>${s}</b> ${rangoSegmento(d.rangos, s)}`).join(' · ')}. Solo cuentan los clientes con venta neta mayor a 0, igual que la cobertura.`, 'info')}
+    ${FECHAS.fin < finDeMes(FECHAS.hasta) ? nota(`${mesLargo(FECHAS.hasta)} aún no cierra (datos al ${fechaCorta(FECHAS.fin)}): los clientes todavía pueden subir de segmento. Para una foto completa, elige un mes cerrado.`, 'calendar-clock', 'warn') : ''}
+    <div class="grid g-kpi">
+      ${letras.map(s => kpi(`Segmento ${s} · ${SEG_DESC[s]}`, fmt(porSeg[s].clientes),
+        `${fmt1(pct(porSeg[s].clientes, total.clientes))}% de clientes · ${moneyC(porSeg[s].venta)} (${fmt1(pct(porSeg[s].venta, total.venta))}% venta)`,
+        { ic: 'medal', tono: { A: 't-green', B: 't-blue', C: 't-violet', D: 't-amber', E: 't-slate' }[s] })).join('')}
+    </div>
+    <div style="margin-bottom:1rem"><div class="seg">${SEG_DIMS.map(x => `<button class="${x.k === SEG_CFG.dim ? 'on' : ''}" onclick="SEG_CFG.dim='${x.k}';render()">${icon(x.ic)}${x.l}</button>`).join('')}</div></div>
+    ${card(`Clientes por segmento y ${dim.l.toLowerCase()}`, chWrap('c_seg', 'lg'), { ic: 'chart-bar-big', sub: `Primeros 15 por número de clientes · ${periodo}`, tono: 't-green' })}
+    ${card('Detalle', table(
+      [{ h: dim.l, f: v => `<b>${esc(v)}</b>` }, ...letras.map(s => ({ h: s, n: 1, f: fmt })), { h: 'Total', n: 1, f: v => `<b>${fmt(v)}</b>` }, { h: '% A + B', n: 1, f: v => fmt1(v) + '%' }],
+      grupos.map(g => [g.clave, ...letras.map(s => g[s] || 0), g.total, pct((g.A || 0) + (g.B || 0), g.total)])
+    ), { ic: 'table-2', sub: `${grupos.length} filas · clientes por segmento`, tono: 't-slate' })}
+    ${card('Listado de clientes', `
+      <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-bottom:.8rem">
+        <div class="seg">${['', ...letras].map(s => `<button class="${SEG_CFG.segmento === s ? 'on' : ''}" onclick="SEG_CFG.segmento='${s}';render()">${s ? 'Segmento ' + s : 'Todos'}</button>`).join('')}</div>
+        <div class="grow"></div>
+        <button class="btn btn-ac btn-sm" onclick="location.href='/api/segmentos/clientes.csv'+qs({segmento: SEG_CFG.segmento})">${icon('download')}Descargar listado (${fmt(totalLista)})</button>
+      </div>
+      ${table(
+        [{ h: 'Cliente', f: v => `<b>${esc(v)}</b>` }, { h: 'Seg.', f: s => `<span class="tag" style="background:${SEG_COLOR[s]}1f;color:${SEG_COLOR[s]}">${s}</span>` }, { h: 'Compra mensual', n: 1, f: money2 }, { h: 'Venta período', n: 1, f: money2 }, { h: 'SKUs', n: 1, f: fmt }, { h: 'Documentos', n: 1, f: fmt }, { h: 'Sede' }, { h: 'Distrito' }, { h: 'Canal' }, { h: 'Supervisor' }],
+        lista.map(c => [c.codigo_cliente, c.segmento, c.mensual, c.venta, c.skus, c.documentos, c.sede, c.distrito, c.canal, c.supervisor])
+      )}
+      ${totalLista > lista.length ? `<p class="sub" style="margin:.6rem 0 0">Se muestran los ${fmt(lista.length)} clientes de mayor compra; el listado completo está en la descarga.</p>` : ''}`,
+      { ic: 'list', sub: `${fmt(totalLista)} clientes${SEG_CFG.segmento ? ' del segmento ' + SEG_CFG.segmento : ''}${hayFiltros() ? ' · con tus filtros' : ''}`, tono: 't-blue' })}`);
+  if (!ok) return;
+
+  const top = grupos.slice(0, 15);
+  chart('c_seg', {
+    type: 'bar',
+    data: { labels: top.map(g => String(g.clave).slice(0, 28)), datasets: letras.map(s => ({ label: s, data: top.map(g => g[s] || 0), backgroundColor: SEG_COLOR[s], maxBarThickness: 22 })) },
+    options: {
+      indexAxis: 'y',
+      plugins: { tooltip: { callbacks: { label: c => ` Segmento ${c.dataset.label}: ${fmt(c.raw)} clientes` } } },
+      scales: { x: { stacked: true, grid: { color: '#f1f3f8' } }, y: { stacked: true, grid: { display: false }, ticks: { autoSkip: false } } }
+    }
+  });
 }
 
 // =======================================================================
@@ -839,7 +975,7 @@ async function vistaPaquete() {
       <div><b>${titulo}</b><span>${desc}</span><div class="cols">${cols.map(c => `<code>${c}</code>`).join('')}</div></div>
       <div class="chk">${PAQ_SEL[k] ? icon('check') : ''}</div></div>`;
   document.getElementById('view').innerHTML = `
-    ${nota(`Ventas se descarga del <b>${fechaCorta(FECHAS.ini)} al ${fechaCorta(FECHAS.fin)} ${FECHAS.fin.slice(0, 4)}</b> (cámbialo arriba). ${hayFiltros() ? 'Los <b>filtros activos</b> también se aplican a la descarga.' : 'Sin filtros: se descarga todo.'} Stock siempre es la foto más reciente.`, 'calendar-check')}
+    ${nota(`Ventas se descarga de <b>${etiquetaPeriodo(FECHAS.ini, FECHAS.fin)}</b> (cámbialo arriba). Los meses del año anterior traen solo las columnas que se guardan de ese año. ${hayFiltros() ? 'Los <b>filtros activos</b> también se aplican a la descarga.' : 'Sin filtros: se descarga todo.'} Stock siempre es la foto más reciente.`, 'calendar-check')}
     <div class="pkg">
       ${pkg('ventas', 'receipt-text', 't-red', 'Ventas', 'Detalle por documento y producto, con sede, distrito, categoría y código proveedor.', COLS_VENTAS)}
       ${pkg('stock', 'warehouse', 't-blue', 'Stock', 'Foto del inventario por almacén y lote, con categoría, código proveedor y factor.', COLS_STOCK)}

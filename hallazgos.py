@@ -1,9 +1,8 @@
 """
 hallazgos.py — "resumen inteligente" del portal, sin IA y sin costo.
 
-Compara el período elegido con el inmediatamente anterior (misma cantidad de
-días) y aplica reglas fijas sobre los números que ya calcula db.py: qué cambió,
-qué lo explica y qué productos están en riesgo. Cada frase sale de un cálculo
+Compara el período elegido con las mismas fechas del año anterior y aplica
+reglas fijas sobre los números que ya calcula db.py: qué cambió, qué lo explica y qué productos están en riesgo. Cada frase sale de un cálculo
 real, así que nunca inventa cifras y los datos no salen del servidor.
 """
 from datetime import date, datetime, timedelta
@@ -101,21 +100,34 @@ def _etiqueta(f):
     return f["clave"]
 
 
+def _menos_un_anio(d):
+    try:
+        return d.replace(year=d.year - 1)
+    except ValueError:          # 29 de febrero
+        return d.replace(year=d.year - 1, day=28)
+
+
 def periodo_anterior(desde, hasta):
     """
     Con qué se compara el período (mismo criterio que rangoAnterior en app.js):
-    - Mes en curso (desde el día 1, dentro de un mes): los mismos días del mes
-      anterior. 1–2 nov se compara con 1–2 oct, no con 30–31 oct (fin de mes).
-    - Cualquier otro rango: los mismos días inmediatamente anteriores.
+    las mismas fechas del año anterior (pedido de PEUSAC, nov 2026). Noviembre
+    2026 se compara con noviembre 2025; si el mes está en curso (1–17 nov),
+    con los mismos días (1–17 nov 2025).
     """
-    if desde.day == 1 and (desde.year, desde.month) == (hasta.year, hasta.month):
-        ultimo_ant = desde - timedelta(days=1)
-        inicio_ant = ultimo_ant.replace(day=1)
-        fin_ant = ultimo_ant.replace(day=min(hasta.day, ultimo_ant.day))
-        return inicio_ant, fin_ant
-    dias = (hasta - desde).days + 1
-    fin_ant = desde - timedelta(days=1)
-    return fin_ant - timedelta(days=dias - 1), fin_ant
+    return _menos_un_anio(desde), _menos_un_anio(hasta)
+
+
+def _periodo_txt(desde_iso, hasta_iso):
+    """'nov 2025' si es un mes completo; si no, '1–17 nov 2025'."""
+    d, h = date.fromisoformat(desde_iso), date.fromisoformat(hasta_iso)
+    ultimo = (h.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    if d.day == 1 and h == ultimo:
+        if (d.year, d.month) == (h.year, h.month):
+            return f"{MESES[d.month - 1]} {d.year}"
+        return f"{MESES[d.month - 1]} {d.year} a {MESES[h.month - 1]} {h.year}"
+    if (d.year, d.month) == (h.year, h.month):
+        return f"{d.day}–{h.day} {MESES[h.month - 1]} {h.year}"
+    return f"{_fecha(desde_iso)}–{_fecha(hasta_iso)} {h.year}"
 
 
 def calcular(proveedor, desde, hasta, filtros=()):
@@ -172,7 +184,7 @@ def calcular(proveedor, desde, hasta, filtros=()):
     if hay_anterior and v_venta is not None:
         t(", ")
         t(f"{_pct(v_venta)} {'más' if v_venta >= 0 else 'menos'}", "up" if v_venta >= 0 else "down")
-        t(f" que del {_fecha(ant_desde_s)} al {_fecha(ant_hasta_s)}. ")
+        t(f" que en {_periodo_txt(ant_desde_s, ant_hasta_s)}. ")
         if dias < 7:
             t(f"(Ojo: el período tiene solo {dias} día{'s' if dias > 1 else ''}; la comparación puede variar mucho según el día de la semana.) ")
         if abs(v_venta) >= UMBRAL_VARIACION and v_clientes is not None and v_vpc is not None:
@@ -252,7 +264,7 @@ def calcular(proveedor, desde, hasta, filtros=()):
             accion = {"tab": "ventas", "dim": causa["dimension"], "label": f"Ver venta por {NOMBRE_DIM[causa['dimension']].split(' ', 1)[1]}"}
         hallazgos.append(_hallazgo(
             "positivo" if signo > 0 else "alerta", "trending-up" if signo > 0 else "trending-down",
-            f"La venta {'subió' if signo > 0 else 'bajó'} {_pct(v_venta)} ({'+' if signo > 0 else '−'}{_soles(abs(diferencia))}) frente al período anterior",
+            f"La venta {'subió' if signo > 0 else 'bajó'} {_pct(v_venta)} ({'+' if signo > 0 else '−'}{_soles(abs(diferencia))}) frente al año anterior",
             detalle, accion, prioridad=80 if signo < 0 else 40))
 
     # --- Cobertura (clientes) y dónde se ganaron o perdieron
@@ -261,7 +273,7 @@ def calcular(proveedor, desde, hasta, filtros=()):
         dif = act["cobertura"] - ant["cobertura"]
         causa = _mayor_contribuyente(variacion, dims & {"sede", "distrito", "canal", "supervisor", "tipo_negocio"},
                                      "clientes_act", "clientes_ant", signo)
-        detalle = f"Compraron {_num(act['cobertura'])} clientes, frente a {_num(ant['cobertura'])} en el período anterior."
+        detalle = f"Compraron {_num(act['cobertura'])} clientes, frente a {_num(ant['cobertura'])} en {_periodo_txt(ant_desde_s, ant_hasta_s)}."
         accion = {"tab": "ventas", "dim": "canal", "orden": "cobertura", "label": "Ver clientes por canal"}
         if causa:
             detalle += (f" El mayor cambio está en {NOMBRE_DIM[causa['dimension']]} {_etiqueta(causa)} "
@@ -301,7 +313,7 @@ def calcular(proveedor, desde, hasta, filtros=()):
         hallazgos.append(_hallazgo(
             "positivo" if v_ticket > 0 else "revisar", "ticket",
             f"El ticket promedio {'subió' if v_ticket > 0 else 'bajó'} {_pct(v_ticket)} (S/ {act['ticket_documento']:,.2f} por documento)",
-            f"En el período anterior era S/ {ant['ticket_documento']:,.2f}. "
+            f"En {_periodo_txt(ant_desde_s, ant_hasta_s)} era S/ {ant['ticket_documento']:,.2f}. "
             + ("Los clientes que compran están llevando más por pedido." if v_ticket > 0 else "Los pedidos son más chicos que antes."),
             prioridad=30 if v_ticket > 0 else 55))
 
