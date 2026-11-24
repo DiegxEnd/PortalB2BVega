@@ -322,6 +322,15 @@ td .muted { color: var(--mut); font-size: .74rem; display: block; }
 .hz-det { display: none; margin: .6rem 0 0 2.6rem; font-size: .8rem; color: var(--mut); line-height: 1.6; }
 .hz-item.on .hz-det { display: block; }
 .hz-det .btn { margin-top: .55rem; }
+table.mam th.grp { text-align: center; border-bottom: 1px solid var(--bd); }
+table.mam .sep { border-right: 1px solid var(--bd); }
+table.mam .muted-c { color: var(--mut); }
+table.mam td, table.mam th { white-space: nowrap; }
+.hz-bloque { border-left: 3px solid #2563eb; padding: .1rem 0 .2rem .9rem; margin-bottom: 1rem; }
+.hz-bloque.inv { border-left-color: #e08a0b; }
+.hz-bt { display: flex; align-items: center; gap: .45rem; flex-wrap: wrap; margin-bottom: .6rem; font-size: .86rem; }
+.hz-bt .lucide { width: 16px; height: 16px; color: var(--mut); }
+.hz-bt span { color: var(--mut); font-size: .74rem; }
 .hz-foot { display: flex; gap: .4rem; align-items: center; margin-top: .8rem; font-size: .72rem; color: var(--mut-2); }
 .hz-foot .lucide { width: 14px; height: 14px; }
 @media (max-width: 900px) { .hz-list { grid-template-columns: 1fr; } }
@@ -381,3 +390,4 @@ td .muted { color: var(--mut); font-size: .74rem; display: block; }
   .g-2, .g-3, .pkg { grid-template-columns: 1fr; }
   .fpop { position: fixed; left: 1rem; right: 1rem; width: auto; top: 30%; }
 }
+.cel-sub { display: block; font-size: .72rem; color: var(--mut); font-weight: 400; white-space: nowrap; }

@@ -185,9 +185,8 @@ function topMasOtros(filas, n = 6, campo = 'venta') {
 const TABS = [
   { id: 'resumen', label: 'Resumen', ic: 'layout-dashboard', sub: 'Indicadores principales del período' },
   { id: 'ventas', label: 'Análisis de ventas', ic: 'chart-column-big', sub: 'Explora la venta por cualquier dimensión' },
-  { id: 'inventario', label: 'Inventario', ic: 'warehouse', sub: 'Foto del stock, sincronizada cada hora' },
+  { id: 'inventario', label: 'Inventario', ic: 'warehouse', sub: 'Stock actual y días de inventario' },
   { id: 'segmentos', label: 'Segmentos de clientes', ic: 'medal', sub: 'Clientes A–E según su compra mensual', nuevo: true },
-  { id: 'dias', label: 'Días de inventario', ic: 'hourglass', sub: 'Cuántos días alcanza el stock con la venta actual' },
   { id: 'paquete', label: 'Descargas', ic: 'download', sub: 'Reportes de ventas y stock listos para Excel' },
 ];
 
@@ -199,7 +198,6 @@ const FILTROS = [
   { k: 'tipo_negocio', l: 'Tipo de negocio', ic: 'shopping-basket' },
   { k: 'jefe_ventas', l: 'Jefe de ventas', ic: 'user-cog' },
   { k: 'supervisor', l: 'Supervisor', ic: 'users' },
-  { k: 'linea', l: 'Línea', ic: 'layers', stock: true },
   { k: 'marca', l: 'Marca', ic: 'award', stock: true },
   { k: 'categoria', l: 'Categoría', ic: 'tags', stock: true, falta: 'Completa la categoría en la tabla productos de Supabase.' },
   { k: 'codigo_proveedor', l: 'Código proveedor', ic: 'hash', stock: true, falta: 'Completa el código proveedor en la tabla productos de Supabase.' },
@@ -269,7 +267,7 @@ function opcionesDe(k) {
 }
 
 function renderFiltros() {
-  const tabStock = TAB === 'inventario' || TAB === 'dias';
+  const tabStock = TAB === 'inventario';
   const usaFechas = !tabStock;
   const apagado = 'opacity:.45;pointer-events:none';
   const el = document.getElementById('filterbar');
@@ -413,7 +411,7 @@ async function render() {
   document.getElementById('pageTitle').textContent = tab.label;
   document.getElementById('crumb').textContent = tab.sub;
   renderFiltros();
-  const vistas = { resumen: vistaResumen, ventas: vistaVentas, inventario: vistaInventario, segmentos: vistaSegmentos, dias: vistaDias, paquete: vistaPaquete };
+  const vistas = { resumen: vistaResumen, ventas: vistaVentas, inventario: vistaInventario, segmentos: vistaSegmentos, paquete: vistaPaquete };
   try {
     await vistas[TAB](() => id === RENDER_ID);
   } catch (e) {
@@ -468,7 +466,8 @@ function irA(i) {
   const a = HZ_ACCIONES[i];
   if (!a) return;
   if (a.tab === 'ventas') { EXP.dim = a.dim || 'canal'; EXP.orden = a.orden || 'venta'; }
-  if (a.tab === 'dias') DIAS_CFG.nivel = a.nivel || 'producto';
+  // Días de inventario ahora vive dentro de Inventario.
+  if (a.tab === 'dias' || a.tab === 'inventario') { INV_NIVEL = a.nivel || 'producto'; goTo('inventario'); return; }
   goTo(a.tab);
 }
 
@@ -478,8 +477,8 @@ async function cargarHallazgos(vigente, promesa) {
   if (!vigente() || !caja) return;
   if (!d) { caja.innerHTML = ''; return; }
   HZ_ACCIONES = [];
-  const texto = d.resumen.map(s => s.e === 'b' ? `<b>${esc(s.t)}</b>` : s.e ? `<span class="${s.e}">${esc(s.t)}</span>` : esc(s.t)).join('');
-  const items = d.hallazgos.map(h => {
+  const parrafo = segs => (segs || []).map(s => s.e === 'b' ? `<b>${esc(s.t)}</b>` : s.e ? `<span class="${s.e}">${esc(s.t)}</span>` : esc(s.t)).join('');
+  const item = h => {
     const tipo = HZ_TIPO[h.tipo] || HZ_TIPO.info;
     let boton = '';
     if (h.accion) {
@@ -490,14 +489,24 @@ async function cargarHallazgos(vigente, promesa) {
       <div class="hz-row"><span class="hz-ic ${tipo.tono}">${icon(h.icono)}</span><span class="hz-t">${esc(h.titulo)}</span>
         <span class="tag ${tipo.tono}">${tipo.tag}</span>${icon('chevron-down', 'class="chev"')}</div>
       <div class="hz-det">${esc(h.detalle)}${boton}</div></div>`;
-  }).join('');
+  };
+  const ventas = d.hallazgos.filter(h => h.bloque !== 'inventario').map(item).join('');
+  const inventario = d.hallazgos.filter(h => h.bloque === 'inventario').map(item).join('');
   caja.innerHTML = `<div class="card hz">
     <div class="hz-head"><span class="ic">${icon('sparkles')}</span>
-      <div style="flex:1"><h3>Hallazgos del período</h3><small>${etiquetaPeriodo(d.periodo.desde, d.periodo.hasta)} · comparado con ${etiquetaPeriodo(d.periodo.ant_desde, d.periodo.ant_hasta)}${hayFiltros() ? ' · con tus filtros' : ''}</small></div>
+      <div style="flex:1"><h3>Hallazgos</h3><small>Generados con reglas sobre tus datos reales${hayFiltros() ? ' · con tus filtros' : ''}</small></div>
       ${d.alertas ? `<span class="tag t-red">${d.alertas} alerta${d.alertas > 1 ? 's' : ''}</span>` : '<span class="tag t-green">Sin alertas</span>'}</div>
-    <p class="hz-txt">${texto}</p>
-    <div class="hz-list">${items || '<div class="sub">No hay cambios relevantes en este período.</div>'}</div>
-    <div class="hz-foot">${icon('info')}Generado automáticamente con reglas sobre tus datos reales. Toca cada hallazgo para ver el detalle.</div></div>`;
+    <div class="hz-bloque">
+      <div class="hz-bt">${icon('chart-column-big')}<b>Ventas de ${etiquetaPeriodo(d.periodo.desde, d.periodo.hasta)}</b><span>vs ${etiquetaPeriodo(d.periodo.ant_desde, d.periodo.ant_hasta)} · cambia con el período elegido</span></div>
+      <p class="hz-txt">${parrafo(d.resumen)}</p>
+      <div class="hz-list">${ventas || '<div class="sub">No hay cambios relevantes en este período.</div>'}</div>
+    </div>
+    <div class="hz-bloque inv">
+      <div class="hz-bt">${icon('warehouse')}<b>Inventario hoy</b><span>foto actual del stock · no cambia con el período</span></div>
+      ${(d.resumen_inventario || []).length ? `<p class="hz-txt">${parrafo(d.resumen_inventario)}</p>` : ''}
+      <div class="hz-list">${inventario || '<div class="sub">Sin alertas de inventario.</div>'}</div>
+    </div>
+    <div class="hz-foot">${icon('info')}Toca cada hallazgo para ver el detalle.</div></div>`;
   icons();
 }
 
@@ -522,6 +531,39 @@ function dibujarCanal() {
   // Re-pintar el selector sin re-consultar datos.
   const seg = document.getElementById('c_canal')?.closest('.card')?.querySelector('.card-h .seg');
   if (seg) seg.outerHTML = segMetrica('MIX_CANAL', MIX_CANAL, 'dibujarCanal()');
+}
+
+// Barras por mes: cada mes del año del período junto al mismo mes del año
+// anterior, en soles o en clientes. Lo usan el Resumen y Análisis de ventas.
+let ANUAL_MET = 'venta';
+const DATOS_ANUAL = {};
+const anioActual = () => +(FECHAS.fin || RANGO.max).slice(0, 4);
+function dibujarAnual(id) {
+  const filas = DATOS_ANUAL[id];
+  if (!filas) return;
+  const y = anioActual(), enClientes = ANUAL_MET === 'cobertura';
+  const valor = (anio, m) => {
+    const f = filas.find(x => x.clave === `${anio}-${String(m).padStart(2, '0')}`);
+    return f ? Math.round(enClientes ? f.cobertura : f.venta) : null;
+  };
+  const meses = [...Array(12).keys()].map(i => i + 1);
+  const ant = meses.map(m => valor(y - 1, m)), act = meses.map(m => valor(y, m));
+  const fmtV = enClientes ? v => fmt(v) + ' clientes' : money;
+  chart(id, {
+    type: 'bar',
+    data: {
+      labels: meses.map(m => MESES[m - 1]), datasets: [
+        { label: String(y - 1), data: ant, backgroundColor: '#cbd5e1', borderRadius: 5, maxBarThickness: 26 },
+        { label: String(y), data: act, backgroundColor: enClientes ? PAL[1] : PAL[0], borderRadius: 5, maxBarThickness: 26 }]
+    },
+    options: {
+      interaction: { mode: 'index', intersect: false },
+      plugins: { tooltip: { callbacks: { label: c => ` ${c.dataset.label}: ${c.raw == null ? '—' : fmtV(c.raw)}`, afterBody: it => { const d = delta(act[it[0].dataIndex], ant[it[0].dataIndex]); return d == null || act[it[0].dataIndex] == null ? '' : ` Variación: ${d >= 0 ? '+' : '−'}${fmt1(Math.abs(d))}%`; } } } },
+      scales: { y: { ticks: { callback: v => compact(v) } }, x: { grid: { display: false } } }
+    }
+  });
+  const seg = document.getElementById(id)?.closest('.card')?.querySelector('.card-h .seg');
+  if (seg) seg.outerHTML = segMetrica('ANUAL_MET', ANUAL_MET, `dibujarAnual('${id}')`);
 }
 
 // "Venta por sede": período elegido frente al mismo período del año anterior,
@@ -558,7 +600,8 @@ async function vistaResumen(vigente) {
   const hzPromesa = api('/api/hallazgos' + qs()).catch(() => null);
   const ant = rangoAnterior(FECHAS.ini, FECHAS.fin);
   const historia = qs({ desde: RANGO.min, hasta: RANGO.max }, { fechas: false });
-  const [r, rAnt, mes, semana, canal, dia, prod, sede, sedeAnt, cat, diasInv] = await Promise.all([
+  const uniPromesa = api('/api/universo' + qs({ dim: 'sede' })).catch(() => null);
+  const [r, rAnt, mes, semana, canal, dia, prod, prodAnt, sede, sedeAnt, cat, diasInv] = await Promise.all([
     api('/api/resumen' + qs()),
     api('/api/resumen' + qs({ desde: ant.ini, hasta: ant.fin }, { fechas: false })).catch(() => null),
     api('/api/agrupado/mes' + historia),
@@ -566,6 +609,7 @@ async function vistaResumen(vigente) {
     api('/api/agrupado/canal' + qs()),
     api('/api/agrupado/dia_semana' + qs()),
     api('/api/agrupado/codigo_producto' + qs({ top: 10 })),
+    api('/api/agrupado/codigo_producto' + qs({ desde: ant.ini, hasta: ant.fin }, { fechas: false })).catch(() => []),
     api('/api/agrupado/sede' + qs()),
     api('/api/agrupado/sede' + qs({ desde: ant.ini, hasta: ant.fin }, { fechas: false })).catch(() => []),
     api('/api/agrupado/categoria' + qs()),
@@ -576,6 +620,7 @@ async function vistaResumen(vigente) {
   const totalDias = agruparDias(diasInv, 'total')[0];
   const diasStock = totalDias && r.cajas_stock > 0 ? totalDias.dias : null;
   const vsTxt = `vs ${etiquetaPeriodo(ant.ini, ant.fin)}`;
+  const pen = penetracionTotal(await uniPromesa, mes);
 
   const ok = pintar(vigente, `
     <div id="hz"><div class="sk" style="height:230px;border-radius:16px;margin-bottom:1rem"></div></div>
@@ -583,6 +628,8 @@ async function vistaResumen(vigente) {
     <div class="grid g-kpi">
       ${kpi('Venta neta s/IGV', moneyC(r.venta_neta), vsTxt, { ic: 'banknote', hero: true, delta: delta(r.venta_neta, a.venta_neta) })}
       ${kpi('Cobertura', fmt(r.cobertura), `clientes · ${vsTxt}`, { ic: 'users-round', tono: 't-blue', delta: delta(r.cobertura, a.cobertura) })}
+      ${pen ? kpi('Penetración', fmt1(pen.pct) + '%', `${fmt(Math.round(pen.clientes))} clientes/mes de ${fmt(pen.universo)} del universo Vega`, { ic: 'target', tono: 't-violet' })
+            : kpi('Penetración', '—', 'no aplica con filtros de canal, tipo de negocio, jefe o supervisor', { ic: 'target', tono: 't-violet' })}
       ${kpi('Cajas vendidas', fmt(r.cajas), `${fmt1(r.cajas_diarias)} cajas por día`, { ic: 'boxes', tono: 't-green', delta: delta(r.cajas, a.cajas) })}
       ${kpi('Documentos', fmt(r.documentos), 'boletas y facturas', { ic: 'receipt-text', tono: 't-violet', delta: delta(r.documentos, a.documentos) })}
       ${kpi('Ticket promedio', money(r.ticket_documento), 'venta ÷ documentos', { ic: 'ticket', tono: 't-amber', delta: delta(r.ticket_documento, a.ticket_documento) })}
@@ -591,7 +638,7 @@ async function vistaResumen(vigente) {
       ${kpi('Días de inventario', diasStock == null ? '—' : fmt(diasStock), FUENTE_DIAS === 'rotacion' ? 'stock ÷ rotación diaria por almacén' : 'stock ÷ venta diaria', { ic: 'hourglass', tono: diasStock != null && diasStock < 10 ? 't-red' : 't-green' })}
     </div>
     <div class="grid g-21">
-      ${card('Tendencia mensual', chWrap('c_mes', 'lg'), { ic: 'chart-line', sub: 'Venta y cobertura de todo el historial disponible', tono: 't-red' })}
+      ${card('Crecimiento anual por mes', chWrap('c_mes', 'lg'), { ic: 'chart-column-big', sub: `Cada mes de ${anioActual()} junto al mismo mes de ${anioActual() - 1}`, tono: 't-red', extra: segMetrica('ANUAL_MET', ANUAL_MET, "dibujarAnual('c_mes')") })}
       ${card('Mix por canal', chWrap('c_canal', 'lg'), { ic: 'chart-pie', sub: 'Participación por canal', tono: 't-blue', extra: segMetrica('MIX_CANAL', MIX_CANAL, 'dibujarCanal()') })}
     </div>
     <div class="grid g-21">
@@ -600,9 +647,9 @@ async function vistaResumen(vigente) {
     </div>
     <div class="grid g-21">
       ${card('Top 10 productos', table(
-        [{ h: '#', f: v => `<span class="rank">${v}</span>` }, { h: 'Producto', f: v => v }, { h: 'Venta', n: 1, f: money }, { h: 'Part.', f: v => barra(v) }, { h: 'Cajas', n: 1, f: fmt }, { h: 'Clientes', n: 1, f: fmt }],
-        prod.map((p, i) => [i + 1, `<b>${esc(p.descripcion)}</b><span class="muted">${esc(p.clave)}</span>`, p.venta, pct(p.venta, r.venta_neta), p.cajas, p.cobertura])
-      ), { ic: 'trophy', sub: 'Por venta neta en el período', tono: 't-amber' })}
+        [{ h: '#', f: v => `<span class="rank">${v}</span>` }, { h: 'Producto', f: v => v }, { h: 'Venta', n: 1, f: money }, { h: `Venta ${+ant.fin.slice(0, 4)}`, n: 1, f: money }, { h: 'Var.', n: 1, f: variacionCelda }, { h: 'Part.', f: v => barra(v) }, { h: 'Clientes', n: 1, f: fmt }],
+        conAnterior(prod, prodAnt).map((p, i) => [i + 1, `<b>${esc(p.descripcion)}</b><span class="muted">${esc(p.clave)}</span>`, p.venta, p.venta_ant, delta(p.venta, p.venta_ant), pct(p.venta, r.venta_neta), p.cobertura])
+      ), { ic: 'trophy', sub: `Por venta neta · comparado con ${etiquetaPeriodo(ant.ini, ant.fin)}`, tono: 't-amber' })}
       <div style="display:grid;gap:1rem">
         ${card('Venta por sede', chWrap('c_sede', 'sm'), { ic: 'building-2', tono: 't-violet', sub: 'vs año anterior', extra: segMetrica('SEDE_MET', SEDE_MET, 'dibujarSede()') })}
         ${card('Venta por categoría', chWrap('c_cat', 'sm'), { ic: 'tags', tono: 't-cyan' })}
@@ -611,14 +658,8 @@ async function vistaResumen(vigente) {
   if (!ok) return;
   cargarHallazgos(vigente, hzPromesa);
 
-  chart('c_mes', {
-    data: {
-      labels: mes.map(m => mesLabel(m.clave)), datasets: [
-        { type: 'bar', label: 'Venta S/', data: mes.map(m => Math.round(m.venta)), backgroundColor: mes.map(m => (m.clave >= FECHAS.ini.slice(0, 7) && m.clave <= FECHAS.fin.slice(0, 7)) ? PAL[0] : '#f6b3b7'), borderRadius: 8, yAxisID: 'y', order: 2 },
-        { type: 'line', label: 'Clientes', data: mes.map(m => m.cobertura), borderColor: PAL[1], backgroundColor: PAL[1], tension: .35, pointRadius: 3, yAxisID: 'y1', order: 1 }]
-    },
-    options: { interaction: { mode: 'index', intersect: false }, scales: { y: { ticks: tickMoney }, y1: { position: 'right', grid: { display: false }, ticks: { callback: v => compact(v) } }, x: { grid: { display: false } } } }
-  });
+  DATOS_ANUAL.c_mes = mes;
+  dibujarAnual('c_mes');
   DATOS_CANAL = { canal, r };
   dibujarCanal();
   const semOrd = [...semana].sort((x, y) => x.clave.localeCompare(y.clave));
@@ -649,7 +690,6 @@ const DIMENSIONES = [
   { k: 'jefe_ventas', l: 'Jefe de ventas', ic: 'user-cog' },
   { k: 'supervisor', l: 'Supervisor', ic: 'users' },
   { k: 'codigo_vendedor', l: 'Vendedor', ic: 'user' },
-  { k: 'linea', l: 'Línea', ic: 'layers' },
   { k: 'marca', l: 'Marca', ic: 'award' },
   { k: 'categoria', l: 'Categoría', ic: 'tags' },
   { k: 'codigo_proveedor', l: 'Código proveedor', ic: 'hash' },
@@ -669,13 +709,27 @@ async function vistaVentas(vigente) {
   document.getElementById('view').innerHTML = cabecera + skKpis(4) + skCharts();
   icons();
 
-  const [r, filasAct, filasAnt, mes] = await Promise.all([
+  const conUniverso = ['sede', 'distrito'].includes(EXP.dim);
+  const [r, filasAct, filasAnt, mes, mesAct, mesAnt, uni] = await Promise.all([
     api('/api/resumen' + qs()),
     api(`/api/agrupado/${EXP.dim}` + qs({ orden: EXP.orden, top: EXP.top || null })),
     api(`/api/agrupado/${EXP.dim}` + qs({ desde: ant.ini, hasta: ant.fin }, { fechas: false })).catch(() => []),
     api('/api/agrupado/mes' + qs({ desde: RANGO.min, hasta: RANGO.max }, { fechas: false })),
+    api(`/api/agrupado_mes/${EXP.dim}` + qs()).catch(() => []),
+    api(`/api/agrupado_mes/${EXP.dim}` + qs({ desde: ant.ini, hasta: ant.fin }, { fechas: false })).catch(() => []),
+    conUniverso ? api('/api/universo' + qs({ dim: EXP.dim })).catch(() => null) : null,
   ]);
   const filas = conAnterior(filasAct, filasAnt);
+  // Penetración = clientes promedio por mes ÷ universo (con varios meses no se
+  // usan los clientes acumulados, que podrían pasar del universo).
+  const meses = mesesDelPeriodo();
+  if (uni) filas.forEach(f => {
+    const suma = mesAct.filter(m => m.clave === f.clave).reduce((s, m) => s + m.cobertura, 0);
+    f.universo = uni.filas[f.clave] || 0;
+    f.penetracion = f.universo ? suma / meses.length / f.universo * 100 : null;
+  });
+  const pen = uni ? penetracionTotal(uni, mes) : null;
+  MES_A_MES = { filas, mesAct, mesAnt, meses, nombre: f => (EXP.dim === 'codigo_producto' ? f.descripcion : f.clave), titulo: d.l };
   const anioAnt = etiquetaPeriodo(ant.ini, ant.fin);
   const enClientes = EXP.orden === 'cobertura';
   const metrica = enClientes ? 'cobertura' : 'venta';
@@ -690,18 +744,27 @@ async function vistaVentas(vigente) {
       ${kpi('Venta total', moneyC(r.venta_neta), `${fmt(r.cobertura)} clientes`, { ic: 'banknote', hero: true })}
       ${kpi(`${d.l} líder`, lider ? esc(String(nombre(lider)).slice(0, 22)) : '—', lider ? `${fmt1(pct(lider.venta, r.venta_neta))}% de la venta` : '', { ic: 'crown', tono: 't-amber' })}
       ${kpi('Concentración top 5', fmt1(pct(top5, r.venta_neta)) + '%', 'de la venta total', { ic: 'target', tono: 't-violet' })}
-      ${kpi('Con venta en el período', fmt(filas.length) + (EXP.top && filas.length === EXP.top ? '+' : ''), EXP.top ? `mostrando top ${EXP.top}` : d.l.toLowerCase(), { ic: d.ic, tono: 't-blue' })}
+      ${pen ? kpi('Penetración total', fmt1(pen.pct) + '%', `${fmt(Math.round(pen.clientes))} clientes/mes de ${fmt(pen.universo)} del universo Vega`, { ic: 'target', tono: 't-violet' })
+            : kpi('Con venta en el período', fmt(filas.length) + (EXP.top && filas.length === EXP.top ? '+' : ''), EXP.top ? `mostrando top ${EXP.top}` : d.l.toLowerCase(), { ic: d.ic, tono: 't-blue' })}
     </div>
-    ${card('Venta histórica mensual', chWrap('c_hist'), { ic: 'chart-column-big', sub: `Soles y coberturas de todo el historial${hayFiltros() ? ', con tus filtros' : ''}`, tono: 't-green' })}
+    ${conUniverso ? '' : nota('Para ver el <b>universo de clientes de Vega y la penetración</b>, elige la dimensión <b>Sede</b> o <b>Distrito</b>.', 'target')}
+    ${uni ? card(`Penetración por ${d.l.toLowerCase()}`, chWrap('c_pen', 'lg'), { ic: 'target', sub: `Clientes con compra por mes ÷ universo de clientes de Vega (foto de ${mesLargo(uni.periodo)})`, tono: 't-violet' }) : ''}
+    ${card('Venta histórica mensual', chWrap('c_hist'), { ic: 'chart-column-big', sub: `Cada mes de ${anioActual()} junto al mismo mes de ${anioActual() - 1}${hayFiltros() ? ', con tus filtros' : ''}`, tono: 't-green', extra: segMetrica('ANUAL_MET', ANUAL_MET, "dibujarAnual('c_hist')") })}
     <div class="grid g-21">
       ${card(`Ranking por ${d.l.toLowerCase()}`, chWrap('c_rank', 'lg'), { ic: 'chart-bar-big', sub: `Primeros 15, en ${enClientes ? 'clientes (cobertura)' : EXP.orden === 'cajas' ? 'cajas' : 'soles'}`, tono: 't-red', extra: segMetrica('EXP.orden', EXP.orden, 'render()') })}
       ${card('Participación', chWrap('c_part', 'lg'), { ic: 'chart-pie', sub: enClientes ? 'En los clientes' : 'En la venta neta', tono: 't-blue' })}
     </div>
     ${card('Detalle', table(
-      [{ h: '#', f: v => `<span class="rank">${v}</span>` }, { h: d.l, f: v => v }, { h: 'Venta', n: 1, f: money }, { h: 'Venta año ant.', n: 1, f: money }, { h: 'Var. venta', n: 1, f: variacionCelda }, { h: 'Participación', f: v => `<div style="display:flex;gap:.5rem;align-items:center">${barra(v)}<small>${fmt1(v)}%</small></div>` }, { h: 'Cajas', n: 1, f: fmt }, { h: 'Clientes', n: 1, f: fmt }, { h: 'Clientes año ant.', n: 1, f: fmt }, { h: 'Var. clientes', n: 1, f: variacionCelda }, { h: 'Venta / cliente', n: 1, f: money }],
-      filas.map((f, i) => [i + 1, es ? `<b>${esc(f.descripcion)}</b><span class="muted">${esc(f.clave)}</span>` : `<b>${esc(f.clave)}</b>`, f.venta, f.venta_ant, delta(f.venta, f.venta_ant), pct(f.venta, r.venta_neta), f.cajas, f.cobertura, f.cobertura_ant, delta(f.cobertura, f.cobertura_ant), f.cobertura ? f.venta / f.cobertura : 0])
-    ), { ic: 'table-2', sub: `${filas.length} filas · año anterior = ${anioAnt}`, tono: 't-slate' })}`);
+      [{ h: '#', f: v => `<span class="rank">${v}</span>` }, { h: d.l, f: v => v }, { h: 'Venta', n: 1, f: money }, { h: 'Venta año ant.', n: 1, f: money }, { h: 'Var. venta', n: 1, f: variacionCelda }, { h: 'Clientes', n: 1, f: fmt },
+        ...(uni ? [{ h: 'Universo Vega', n: 1, f: v => v ? fmt(v) : '—' }, { h: 'Penetración', n: 1, f: v => v == null ? '—' : `<b style="color:#7c5cff">${fmt1(v)}%</b>` }] : []),
+        { h: 'Clientes año ant.', n: 1, f: fmt }, { h: 'Var. clientes', n: 1, f: variacionCelda }, { h: 'Participación', f: v => `<div style="display:flex;gap:.5rem;align-items:center">${barra(v)}<small>${fmt1(v)}%</small></div>` }, { h: 'Cajas', n: 1, f: fmt }, { h: 'Venta / cliente', n: 1, f: money }],
+      filas.map((f, i) => [i + 1, es ? `<b>${esc(f.descripcion)}</b><span class="muted">${esc(f.clave)}</span>` : `<b>${esc(f.clave)}</b>`, f.venta, f.venta_ant, delta(f.venta, f.venta_ant), f.cobertura,
+        ...(uni ? [f.universo, f.penetracion] : []), f.cobertura_ant, delta(f.cobertura, f.cobertura_ant), pct(f.venta, r.venta_neta), f.cajas, f.cobertura ? f.venta / f.cobertura : 0])
+    ), { ic: 'table-2', sub: `${filas.length} filas · año anterior = ${anioAnt}`, tono: 't-slate' })}
+    ${uni ? nota(`<b>Penetración</b> = clientes con compra por mes ÷ universo de clientes de Vega en ${EXP.dim === 'sede' ? 'la sede' : 'el distrito'} (activos con dirección principal activa, foto de ${mesLargo(uni.periodo)}).${meses.length > 1 ? ` Con ${meses.length} meses se usa el promedio mensual de clientes.` : ''}`, 'users-round') : conUniverso ? nota('La penetración no se muestra con filtros de canal, tipo de negocio, jefe o supervisor: el universo de Vega no se divide por esos campos.', 'info') : ''}
+    <div id="mesAMes"></div>`);
   if (!ok) return;
+  tablaMesAMes();
 
   const top15 = filas.slice(0, 15);
   const valor = f => EXP.orden === 'cobertura' ? f.cobertura : EXP.orden === 'cajas' ? Math.round(f.cajas) : Math.round(f.venta);
@@ -712,21 +775,53 @@ async function vistaVentas(vigente) {
     enClientes ? fmt(r.cobertura) : moneyC(r.venta_neta), enClientes ? 'clientes únicos' : 'venta total',
     enClientes ? v => fmt(v) + ' clientes' : money);
 
-  // Barras agrupadas: soles (eje izquierdo) y clientes (eje derecho) por mes.
-  const enRango = m => m.clave >= FECHAS.ini.slice(0, 7) && m.clave <= FECHAS.fin.slice(0, 7);
-  chart('c_hist', {
-    type: 'bar',
-    data: {
-      labels: mes.map(m => mesLabel(m.clave)), datasets: [
-        { label: 'Venta S/', data: mes.map(m => Math.round(m.venta)), backgroundColor: mes.map(m => enRango(m) ? PAL[0] : '#f6b3b7'), borderRadius: 6, yAxisID: 'y' },
-        { label: 'Clientes (cobertura)', data: mes.map(m => m.cobertura), backgroundColor: mes.map(m => enRango(m) ? PAL[1] : '#b9cdf7'), borderRadius: 6, yAxisID: 'y1' }]
-    },
-    options: {
-      interaction: { mode: 'index', intersect: false },
-      plugins: { tooltip: { callbacks: { label: c => c.datasetIndex === 0 ? ` Venta: ${money(c.raw)}` : ` Clientes: ${fmt(c.raw)}` } } },
-      scales: { y: { ticks: tickMoney, title: { display: true, text: 'Soles' } }, y1: { position: 'right', grid: { display: false }, ticks: { callback: v => compact(v) }, title: { display: true, text: 'Clientes' } }, x: { grid: { display: false } } }
-    }
-  });
+  if (uni) {
+    const conPen = filas.filter(f => f.penetracion != null).slice(0, 15);
+    barrasH('c_pen', conPen.map(f => String(nombre(f)).slice(0, 30)), conPen.map(f => Math.round(f.penetracion * 10) / 10),
+      { color: '#7c5cff', fmtV: v => `${fmt1(v)}% de penetración` });
+  }
+  DATOS_ANUAL.c_hist = mes;
+  dibujarAnual('c_hist');
+}
+
+// Penetración total = clientes con compra por mes (promedio de los meses del
+// período, del historial mensual con filtros) ÷ universo de Vega de esas sedes.
+function penetracionTotal(uni, mesesHistoria) {
+  if (!uni) return null;
+  const universo = Object.values(uni.filas).reduce((s, v) => s + v, 0);
+  const meses = mesesDelPeriodo();
+  const clientes = meses.reduce((s, ym) => s + (mesesHistoria.find(m => m.clave === ym)?.cobertura || 0), 0) / meses.length;
+  return universo ? { universo, clientes, pct: clientes / universo * 100, periodo: uni.periodo } : null;
+}
+
+// Meses (AAAA-MM) del período elegido.
+function mesesDelPeriodo() {
+  const lista = [];
+  for (let ym = FECHAS.ini.slice(0, 7); ym <= FECHAS.fin.slice(0, 7); ym = sumarMeses(ym, 1)) lista.push(ym);
+  return lista;
+}
+
+// Comparativo mes a mes: por cada mes del período, el año actual, el anterior
+// y la variación, en soles o en clientes. Se redibuja sin volver a consultar.
+let MES_A_MES = null;
+let MES_MET = 'venta';
+function tablaMesAMes() {
+  const caja = document.getElementById('mesAMes');
+  if (!caja || !MES_A_MES) return;
+  const { filas, mesAct, mesAnt, meses, nombre, titulo } = MES_A_MES;
+  const enClientes = MES_MET === 'cobertura';
+  const idx = lista => new Map(lista.map(m => [`${m.clave}|${m.mes}`, enClientes ? m.cobertura : m.venta]));
+  const act = idx(mesAct), antM = idx(mesAnt);
+  const fmtV = v => v == null ? '—' : enClientes ? fmt(v) : moneyC(v);
+  const cabeza1 = meses.map(ym => `<th colspan="3" class="grp">${mesLargo(ym)} vs ${MESES[+ym.slice(5) - 1]} ${+ym.slice(0, 4) - 1}</th>`).join('');
+  const cabeza2 = meses.map(ym => `<th class="n">${ym.slice(0, 4)}</th><th class="n">${+ym.slice(0, 4) - 1}</th><th class="n sep">Var.</th>`).join('');
+  const cuerpo = filas.map(f => `<tr><td><b>${esc(String(nombre(f)).slice(0, 40))}</b></td>${meses.map(ym => {
+    const a = act.get(`${f.clave}|${ym}`), b = antM.get(`${f.clave}|${menosUnAnio(ym + '-01').slice(0, 7)}`);
+    return `<td class="n">${fmtV(a)}</td><td class="n muted-c">${fmtV(b)}</td><td class="n sep">${a == null ? '—' : variacionCelda(delta(a, b))}</td>`;
+  }).join('')}</tr>`).join('');
+  caja.innerHTML = card('Comparativo mes a mes', filas.length ? `<div class="ov"><table class="mam"><thead><tr><th rowspan="2">${esc(titulo)}</th>${cabeza1}</tr><tr>${cabeza2}</tr></thead><tbody>${cuerpo}</tbody></table></div>` : vacio('Sin datos para los filtros elegidos', 'search-x'),
+    { ic: 'calendar-range', sub: `Cada mes del período frente al mismo mes del año anterior, en ${enClientes ? 'clientes (cobertura del mes)' : 'soles'}`, tono: 't-violet', extra: segMetrica('MES_MET', MES_MET, 'tablaMesAMes()') });
+  icons();
 }
 
 // =======================================================================
@@ -737,7 +832,7 @@ let INV_DIAS = [];
 function tablaDiasInventario() {
   const caja = document.getElementById('invDias');
   if (!caja) return;
-  const niveles = DIAS_NIVELES.filter(n => ['sede', 'linea', 'categoria', 'producto'].includes(n.k));
+  const niveles = DIAS_NIVELES.filter(n => ['sede', 'categoria', 'codigo_proveedor', 'producto'].includes(n.k));
   const esProd = INV_NIVEL === 'producto';
   const nivel = niveles.find(n => n.k === INV_NIVEL);
   const cols = [{ h: nivel.l, f: v => v }];
@@ -750,15 +845,35 @@ function tablaDiasInventario() {
     return r;
   });
   const seg = `<div class="seg">${niveles.map(n => `<button class="${n.k === INV_NIVEL ? 'on' : ''}" onclick="INV_NIVEL='${n.k}';tablaDiasInventario()">${icon(n.ic)}${n.l}</button>`).join('')}</div>`;
-  caja.innerHTML = card('Días de inventario', `
-    ${table(cols, rows)}
-    <p class="legend" style="margin:.8rem 0 0"><span><span class="dot bad"></span>menos de ${UMBRAL.bajo} días: riesgo de quiebre</span><span><span class="dot ok"></span>${UMBRAL.bajo} a ${UMBRAL.alto} días: saludable</span><span><span class="dot warn"></span>más de ${UMBRAL.alto} días: sobrestock</span><span><span class="dot gris"></span>sin venta</span></p>`,
+  const grupos = agruparDias(INV_DIAS, INV_NIVEL);
+  caja.innerHTML = card(`Días de inventario por ${nivel.l.toLowerCase()}`, `
+    ${chWrap('c_dias', 'lg')}
+    <p class="legend" style="margin:.8rem 0"><span><span class="dot bad"></span>menos de ${UMBRAL.bajo} días: riesgo de quiebre</span><span><span class="dot ok"></span>${UMBRAL.bajo} a ${UMBRAL.alto} días: saludable</span><span><span class="dot warn"></span>más de ${UMBRAL.alto} días: sobrestock</span><span><span class="dot gris"></span>sin venta</span></p>
+    ${table(cols, rows)}`,
     { ic: 'hourglass', sub: textoFuenteDias(), tono: 't-amber', extra: seg });
   icons();
+  const top = grupos.filter(g => g.dias != null).slice(0, 25);
+  barrasH('c_dias', top.map(g => String(esProd ? (g.descripcion || g.clave) : g.clave).slice(0, 30)), top.map(g => Math.round(g.dias)),
+    { colores: top.map(g => COLOR_ESTADO[estadoDias(g.dias)]), fmtV: v => fmt(v) + ' días' });
+}
+
+// Resumen por categoría: stock, valor, rotación, días y cuántos SKUs están en
+// riesgo de quiebre o en sobrestock (contados por producto, todas las sedes).
+function tablaCategorias(dias) {
+  const productos = agruparDias(dias, 'producto');
+  const filas = agruparDias(dias, 'categoria').map(g => {
+    const suyos = productos.filter(p => p.categoria === g.clave);
+    return [`<b>${esc(g.clave)}</b>`, g.stock, g.valor, g.venta, g.dias,
+      suyos.filter(p => estadoDias(p.dias) === 'bad').length, suyos.filter(p => estadoDias(p.dias) === 'warn').length, suyos.length];
+  });
+  return card('Días de inventario por categoría', table(
+    [{ h: 'Categoría', f: v => v }, { h: 'Stock (cajas)', n: 1, f: fmt }, { h: 'Valor', n: 1, f: money }, { h: 'Venta diaria (cajas)', n: 1, f: fmt1 }, { h: 'Días', n: 1, f: semaforo },
+     { h: `SKUs &lt; ${UMBRAL.bajo} días`, n: 1, f: v => v ? `<b style="color:${COLOR_ESTADO.bad}">${v}</b>` : '0' }, { h: `SKUs &gt; ${UMBRAL.alto} días`, n: 1, f: v => v ? `<b style="color:${COLOR_ESTADO.warn}">${v}</b>` : '0' }, { h: 'SKUs', n: 1, f: fmt }],
+    filas), { ic: 'tags', sub: 'Foto actual del stock · días = stock ÷ rotación diaria', tono: 't-cyan' });
 }
 
 async function vistaInventario(vigente) {
-  document.getElementById('view').innerHTML = skKpis(5) + skCharts('g-2');
+  document.getElementById('view').innerHTML = skKpis(8) + skCharts('g-2');
   const [s, dias] = await Promise.all([
     api('/api/stock' + qs({}, { fechas: false, soloStock: true })),
     api('/api/dias_inventario' + qs({ dias: DIAS_CFG.periodo }, { fechas: false, soloStock: true })),
@@ -766,6 +881,8 @@ async function vistaInventario(vigente) {
   INV_DIAS = dias;
   if (dias.length) FUENTE_DIAS = dias[0].fuente;
   const total = agruparDias(dias, 'total')[0] || { dias: null, venta: 0 };
+  const productos = agruparDias(dias, 'producto');
+  const cuenta = e => productos.filter(p => estadoDias(p.dias) === e).length;
   const ignorados = Object.keys(SEL).filter(k => !FILTRO_DEF[k].stock).map(k => FILTRO_DEF[k].l);
   const sinStockSede = (SEL.sede || []).length && !s.cajas_stock;
   const ok = pintar(vigente, `
@@ -775,14 +892,18 @@ async function vistaInventario(vigente) {
       ${kpi('Valor de inventario', moneyC(s.valor_stock), 'a costo', { ic: 'banknote', hero: true })}
       ${kpi('Cajas en stock', fmt(s.cajas_stock), 'unidad máxima', { ic: 'boxes', tono: 't-green' })}
       ${kpi('Días de inventario', total.dias == null || !s.cajas_stock ? '—' : fmt(total.dias), `stock ÷ ${fmt1(total.venta)} cajas/día`, { ic: 'hourglass', tono: total.dias != null && total.dias < UMBRAL.bajo ? 't-red' : 't-amber' })}
-      ${kpi('SKUs con stock', fmt(s.skus_con_stock), `de ${s.por_producto.length} productos`, { ic: 'package-check', tono: 't-blue' })}
-      ${kpi('Almacenes', fmt(s.almacenes), 'con stock reportado', { ic: 'warehouse', tono: 't-violet' })}
+      ${kpi('SKUs con stock', fmt(s.skus_con_stock), `de ${s.por_producto.length} productos · ${fmt(s.almacenes)} almacenes`, { ic: 'package-check', tono: 't-blue' })}
+      ${kpi('Riesgo de quiebre', fmt(cuenta('bad')), `productos con menos de ${UMBRAL.bajo} días (sumando sedes)`, { ic: 'triangle-alert', tono: 't-red' })}
+      ${kpi('Saludables', fmt(cuenta('ok')), `entre ${UMBRAL.bajo} y ${UMBRAL.alto} días (sumando sedes)`, { ic: 'circle-check-big', tono: 't-green' })}
+      ${kpi('Sobrestock', fmt(cuenta('warn')), `más de ${UMBRAL.alto} días · ${fmt(cuenta('gris'))} sin venta`, { ic: 'archive', tono: 't-amber' })}
+      ${kpi('Venta diaria', fmt1(total.venta), 'cajas por día (rotación)', { ic: 'activity', tono: 't-violet' })}
     </div>
+    ${tablaCategorias(dias)}
+    <div id="invDias" style="margin-bottom:1rem"></div>
     <div class="grid g-2">
       ${card('Valor por almacén', chWrap('c_alm'), { ic: 'warehouse', tono: 't-red' })}
       ${card('Valor por categoría', chWrap('c_icat'), { ic: 'tags', tono: 't-cyan' })}
     </div>
-    <div id="invDias" style="margin-bottom:1rem"></div>
     ${card('Detalle por producto', table(
       [{ h: 'Producto', f: v => v }, { h: 'Categoría' }, { h: 'Cód. proveedor' }, { h: 'Stock', n: 1, f: stockCaja }, { h: 'Valor', n: 1, f: money }, { h: 'Part.', f: v => barra(v) }],
       s.por_producto.map(p => [`<b>${esc(p.descripcion)}</b><span class="muted">${esc(p.clave)}</span>`, p.categoria, p.codigo_proveedor, { c: p.cajas, u: p.unidades, f: p.factor }, p.valor, pct(p.valor, s.valor_stock)])
@@ -806,6 +927,8 @@ const SEG_DIMS = [
   { k: 'supervisor', l: 'Supervisor', ic: 'users' }, { k: 'jefe_ventas', l: 'Jefe de ventas', ic: 'user-cog' },
 ];
 let SEG_CFG = { dim: 'sede', segmento: '' };
+// Celda de la tabla por dimensión: clientes del segmento, su % dentro de la fila y la venta de esos clientes.
+const celdaSegmento = c => `<b>${fmt(c.n)}</b><span class="cel-sub">${fmt1(c.p)}% · ${moneyC(c.v)}</span>`;
 
 function rangoSegmento(rangos, s) {
   const i = rangos.findIndex(r => r.segmento === s);
@@ -830,6 +953,7 @@ async function vistaSegmentos(vigente) {
     total.clientes += f.clientes; total.venta += f.venta;
     const g = porClave.get(f.clave) || { clave: f.clave, total: 0 };
     g[f.segmento] = (g[f.segmento] || 0) + f.clientes; g.total += f.clientes;
+    g['v' + f.segmento] = (g['v' + f.segmento] || 0) + f.venta; g.venta = (g.venta || 0) + f.venta;
     porClave.set(f.clave, g);
   });
   const grupos = [...porClave.values()].sort((a, b) => b.total - a.total);
@@ -848,9 +972,9 @@ async function vistaSegmentos(vigente) {
     <div style="margin-bottom:1rem"><div class="seg">${SEG_DIMS.map(x => `<button class="${x.k === SEG_CFG.dim ? 'on' : ''}" onclick="SEG_CFG.dim='${x.k}';render()">${icon(x.ic)}${x.l}</button>`).join('')}</div></div>
     ${card(`Clientes por segmento y ${dim.l.toLowerCase()}`, chWrap('c_seg', 'lg'), { ic: 'chart-bar-big', sub: `Primeros 15 por número de clientes · ${periodo}`, tono: 't-green' })}
     ${card('Detalle', table(
-      [{ h: dim.l, f: v => `<b>${esc(v)}</b>` }, ...letras.map(s => ({ h: s, n: 1, f: fmt })), { h: 'Total', n: 1, f: v => `<b>${fmt(v)}</b>` }, { h: '% A + B', n: 1, f: v => fmt1(v) + '%' }],
-      grupos.map(g => [g.clave, ...letras.map(s => g[s] || 0), g.total, pct((g.A || 0) + (g.B || 0), g.total)])
-    ), { ic: 'table-2', sub: `${grupos.length} filas · clientes por segmento`, tono: 't-slate' })}
+      [{ h: dim.l, f: v => `<b>${esc(v)}</b>` }, ...letras.map(s => ({ h: `Segmento ${s}`, n: 1, f: celdaSegmento })), { h: 'Total', n: 1, f: c => `<b>${fmt(c.n)}</b><span class="cel-sub">${moneyC(c.v)}</span>` }],
+      grupos.map(g => [g.clave, ...letras.map(s => ({ n: g[s] || 0, p: pct(g[s] || 0, g.total), v: g['v' + s] || 0 })), { n: g.total, v: g.venta }])
+    ), { ic: 'table-2', sub: `${grupos.length} filas · clientes, % de la fila y venta en soles de cada segmento`, tono: 't-slate' })}
     ${card('Listado de clientes', `
       <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-bottom:.8rem">
         <div class="seg">${['', ...letras].map(s => `<button class="${SEG_CFG.segmento === s ? 'on' : ''}" onclick="SEG_CFG.segmento='${s}';render()">${s ? 'Segmento ' + s : 'Todos'}</button>`).join('')}</div>
@@ -858,8 +982,8 @@ async function vistaSegmentos(vigente) {
         <button class="btn btn-ac btn-sm" onclick="location.href='/api/segmentos/clientes.csv'+qs({segmento: SEG_CFG.segmento})">${icon('download')}Descargar listado (${fmt(totalLista)})</button>
       </div>
       ${table(
-        [{ h: 'Cliente', f: v => `<b>${esc(v)}</b>` }, { h: 'Seg.', f: s => `<span class="tag" style="background:${SEG_COLOR[s]}1f;color:${SEG_COLOR[s]}">${s}</span>` }, { h: 'Compra mensual', n: 1, f: money2 }, { h: 'Venta período', n: 1, f: money2 }, { h: 'SKUs', n: 1, f: fmt }, { h: 'Documentos', n: 1, f: fmt }, { h: 'Sede' }, { h: 'Distrito' }, { h: 'Canal' }, { h: 'Supervisor' }],
-        lista.map(c => [c.codigo_cliente, c.segmento, c.mensual, c.venta, c.skus, c.documentos, c.sede, c.distrito, c.canal, c.supervisor])
+        [{ h: 'Cliente', f: v => `<b>${esc(v)}</b>` }, { h: 'Seg.', f: s => `<span class="tag" style="background:${SEG_COLOR[s]}1f;color:${SEG_COLOR[s]}">${s}</span>` }, { h: 'Compra mensual', n: 1, f: money2 }, { h: 'Venta período', n: 1, f: money2 }, { h: 'SKUs', n: 1, f: fmt }, { h: 'Documentos', n: 1, f: fmt }, { h: 'Sede' }, { h: 'Distrito' }, { h: 'Canal' }, { h: 'Tipo de negocio' }, { h: 'Supervisor' }],
+        lista.map(c => [c.codigo_cliente, c.segmento, c.mensual, c.venta, c.skus, c.documentos, c.sede, c.distrito, c.canal, c.tipo_negocio, c.supervisor])
       )}
       ${totalLista > lista.length ? `<p class="sub" style="margin:.6rem 0 0">Se muestran los ${fmt(lista.length)} clientes de mayor compra; el listado completo está en la descarga.</p>` : ''}`,
       { ic: 'list', sub: `${fmt(totalLista)} clientes${SEG_CFG.segmento ? ' del segmento ' + SEG_CFG.segmento : ''}${hayFiltros() ? ' · con tus filtros' : ''}`, tono: 't-blue' })}`);
@@ -890,7 +1014,7 @@ const textoFuenteDias = () => FUENTE_DIAS === 'rotacion'
   : `Stock actual ÷ venta promedio diaria de los últimos ${DIAS_CFG.periodo} días con datos`;
 const DIAS_NIVELES = [
   { k: 'total', l: 'Total', ic: 'badge-check' }, { k: 'sede', l: 'Sede', ic: 'building-2' },
-  { k: 'linea', l: 'Línea', ic: 'layers' }, { k: 'categoria', l: 'Categoría', ic: 'tags' }, { k: 'codigo_proveedor', l: 'Código proveedor', ic: 'hash' },
+  { k: 'categoria', l: 'Categoría', ic: 'tags' }, { k: 'codigo_proveedor', l: 'Código proveedor', ic: 'hash' },
   { k: 'producto', l: 'Producto', ic: 'package' },
 ];
 const UMBRAL = { bajo: 10, alto: 45 };
@@ -917,48 +1041,6 @@ function agruparDias(filas, nivel) {
     // para que al mostrar en enteros salga igual que el REDONDEAR del Excel.
     .map(g => ({ ...g, dias: g.venta > 0 ? Math.round(g.stock / g.venta * 1e6) / 1e6 : null }))
     .sort((a, b) => (a.dias ?? Infinity) - (b.dias ?? Infinity));
-}
-
-async function vistaDias(vigente) {
-  const cabecera = () => `<div class="pagehead"><div><h2>Días de inventario</h2><div class="sub">${textoFuenteDias()}</div></div>
-      ${FUENTE_DIAS === 'rotacion' ? '' : `<select class="sel" onchange="DIAS_CFG.periodo=+this.value;render()">${[7, 15, 30, 60, 90].map(d => `<option value="${d}" ${d === DIAS_CFG.periodo ? 'selected' : ''}>Venta de los últimos ${d} días</option>`).join('')}</select>`}</div>
-    <div style="margin-bottom:1rem"><div class="seg">${DIAS_NIVELES.map(n => `<button class="${n.k === DIAS_CFG.nivel ? 'on' : ''}" onclick="DIAS_CFG.nivel='${n.k}';render()">${icon(n.ic)}Por ${n.l.toLowerCase()}</button>`).join('')}</div></div>`;
-  document.getElementById('view').innerHTML = cabecera() + skKpis(4) + skCharts('g-2', 1);
-  icons();
-
-  const filas = await api('/api/dias_inventario' + qs({ dias: DIAS_CFG.periodo }, { fechas: false, soloStock: true }));
-  if (filas.length) FUENTE_DIAS = filas[0].fuente;
-  const total = agruparDias(filas, 'total')[0] || { stock: 0, venta: 0, valor: 0, dias: null };
-  const productos = agruparDias(filas, 'producto');
-  const grupos = agruparDias(filas, DIAS_CFG.nivel);
-  const cuenta = e => productos.filter(p => estadoDias(p.dias) === e).length;
-  const nivel = DIAS_NIVELES.find(n => n.k === DIAS_CFG.nivel);
-  const esProd = DIAS_CFG.nivel === 'producto';
-
-  const cols = [{ h: nivel.l, f: v => v }];
-  if (esProd) cols.push({ h: 'Categoría' });
-  cols.push({ h: 'Stock', n: 1, f: stockCaja }, { h: 'Valor stock', n: 1, f: money }, { h: 'Venta diaria (cajas)', n: 1, f: fmt1 }, { h: 'Días de inventario', n: 1, f: semaforo }, { h: 'Estado', f: v => `<span style="color:${COLOR_ESTADO[v]};font-weight:600">${TXT_ESTADO[v]}</span>` });
-  const rows = grupos.map(g => {
-    const r = [esProd ? `<b>${esc(g.descripcion || g.clave)}</b><span class="muted">${esc(g.clave)}</span>` : `<b>${esc(g.clave)}</b>`];
-    if (esProd) r.push(g.categoria);
-    r.push({ c: g.stock, u: g.unid, f: g.factor }, g.valor, g.venta, g.dias, estadoDias(g.dias));
-    return r;
-  });
-
-  const ok = pintar(vigente, cabecera() + `
-    ${['sede', 'categoria', 'codigo_proveedor'].includes(DIAS_CFG.nivel) ? avisoDatosNuevos() : ''}
-    <div class="grid g-kpi">
-      ${kpi('Días de inventario de la marca', total.dias == null ? '—' : fmt(total.dias), `${fmt(total.stock)} cajas ÷ ${fmt1(total.venta)} cajas/día`, { ic: 'hourglass', hero: true })}
-      ${kpi('Riesgo de quiebre', fmt(cuenta('bad')), `productos con menos de ${UMBRAL.bajo} días`, { ic: 'triangle-alert', tono: 't-red' })}
-      ${kpi('Saludables', fmt(cuenta('ok')), `entre ${UMBRAL.bajo} y ${UMBRAL.alto} días`, { ic: 'circle-check-big', tono: 't-green' })}
-      ${kpi('Sobrestock', fmt(cuenta('warn')), `más de ${UMBRAL.alto} días · ${fmt(cuenta('gris'))} sin venta`, { ic: 'archive', tono: 't-amber' })}
-    </div>
-    ${DIAS_CFG.nivel === 'total' ? '' : card(`Días de inventario por ${nivel.l.toLowerCase()}`, chWrap('c_dias', 'lg'), { ic: 'chart-bar-big', sub: 'De menor a mayor cobertura', tono: 't-red', extra: `<div class="legend"><span><span class="dot bad"></span>&lt; ${UMBRAL.bajo} días</span><span><span class="dot ok"></span>${UMBRAL.bajo}–${UMBRAL.alto}</span><span><span class="dot warn"></span>&gt; ${UMBRAL.alto}</span></div>` })}
-    ${card('Detalle', table(cols, rows), { ic: 'table-2', sub: `${grupos.length} filas`, tono: 't-slate' })}`);
-  if (!ok || DIAS_CFG.nivel === 'total') return;
-  const top = grupos.filter(g => g.dias != null).slice(0, 25);
-  barrasH('c_dias', top.map(g => String(esProd ? (g.descripcion || g.clave) : g.clave).slice(0, 30)), top.map(g => Math.round(g.dias)),
-    { colores: top.map(g => COLOR_ESTADO[estadoDias(g.dias)]), fmtV: v => fmt(v) + ' días' });
 }
 
 // =======================================================================

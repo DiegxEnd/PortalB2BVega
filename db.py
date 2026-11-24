@@ -111,8 +111,11 @@ def _engine():
             url,
             pool_pre_ping=True,
             pool_recycle=300,
+            # El pooler de Supabase en modo sesión admite 15 clientes en total.
+            # Render corre 2 procesos: 2 × 5 = 10, y quedan 5 para la carga
+            # diaria y para probar en local. Con 4 hilos por proceso, 5 alcanza.
             pool_size=4,
-            max_overflow=4,
+            max_overflow=1,
             pool_timeout=30,
             connect_args={"connect_timeout": 15},
         )
@@ -422,6 +425,73 @@ def agrupar_ventas(proveedor, campo, desde=None, hasta=None, top=None, filtros=(
             item["descripcion"] = f.get("descripcion") or f["clave"]
         salida.append(item)
     return salida
+
+
+@_cacheado
+def agrupar_ventas_mes(proveedor, campo, desde=None, hasta=None, filtros=()):
+    """Venta y cobertura por dimensión y mes: base del comparativo mes a mes y de la penetración."""
+    clave_sql = DIM_VENTAS.get(campo)
+    if not clave_sql:
+        raise ValueError("Campo de agrupación no permitido")
+    where, params = _where_ventas(proveedor, desde, hasta, filtros)
+    filas = _filas(f"""
+        WITH vf AS (
+            SELECT {clave_sql} AS clave, {DIM_VENTAS['mes']} AS mes, v.codigo_cliente,
+                   COALESCE(v.importe_neto_sin_impuesto, 0) AS importe
+            {VENTAS_FROM}
+            WHERE {where}
+        ), por_cliente AS (
+            SELECT clave, mes, codigo_cliente, SUM(importe) AS venta_cliente
+            FROM vf WHERE clave IS NOT NULL
+            GROUP BY clave, mes, codigo_cliente
+        )
+        SELECT clave::text AS clave, mes,
+               SUM(venta_cliente)::double precision AS venta,
+               COUNT(*) FILTER (WHERE codigo_cliente IS NOT NULL AND venta_cliente > 0)::bigint AS cobertura
+        FROM por_cliente GROUP BY 1, 2
+    """, params)
+    return [{"clave": f["clave"], "mes": f["mes"], "venta": float(f["venta"] or 0),
+             "cobertura": int(f["cobertura"] or 0)} for f in filas]
+
+
+# ---------------------------------------------------------------------------
+#  Universo de clientes de Vega (penetración)
+# ---------------------------------------------------------------------------
+# Filtros que describen al cliente y que el universo no tiene (canal, tipo de
+# negocio, jefe, supervisor): con ellos la penetración no se puede calcular.
+# Los de producto sí valen: "clientes que compran X ÷ universo".
+FILTROS_SIN_UNIVERSO = ("canal", "tipo_negocio", "jefe_ventas", "supervisor")
+
+
+@_cacheado
+def universo(proveedor, dimension, hasta=None, filtros=()):
+    """
+    Clientes del universo por sede o distrito, de la foto mensual más reciente
+    hasta el mes de `hasta` (o la más antigua si no hay ninguna anterior).
+    Solo cuentan las sedes donde el proveedor vende. None si no aplica.
+    """
+    if dimension not in ("sede", "distrito"):
+        return None
+    if any(campo in FILTROS_SIN_UNIVERSO for campo, _ in filtros):
+        return None
+    mes = str(hasta)[:7] if hasta else "9999-12"
+    params = {"mes": mes, "sedes": opciones_filtros(proveedor).get("sede") or []}
+    condiciones = ["u.periodo = (SELECT COALESCE(MAX(periodo) FILTER (WHERE periodo <= :mes), MIN(periodo)) FROM public.universo)",
+                   "u.sede = ANY(:sedes)"]
+    for campo, valores in filtros:
+        if campo in ("sede", "distrito") and valores:
+            condiciones.append(f"u.{campo} = ANY(:u_{campo})")
+            params[f"u_{campo}"] = list(valores)
+    filas = _filas(f"""
+        SELECT u.{dimension} AS clave, MAX(u.periodo) AS periodo, SUM(u.clientes)::bigint AS clientes
+        FROM public.universo u
+        WHERE {' AND '.join(condiciones)}
+        GROUP BY 1
+    """, params)
+    if not filas:
+        return None
+    return {"periodo": filas[0]["periodo"],
+            "filas": {f["clave"]: int(f["clientes"]) for f in filas}}
 
 
 DIM_VARIACION = ("canal", "tipo_negocio", "jefe_ventas", "supervisor", "sede",

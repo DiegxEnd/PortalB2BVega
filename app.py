@@ -67,6 +67,10 @@ def _precalentar_proveedor(proveedor):
     db.resumen_ventas(proveedor, ant_inicio, ant_fin, ())
     db.agrupar_ventas(proveedor, 'sede', ant_inicio, ant_fin, None, (), 'venta')
     db.agrupar_ventas(proveedor, 'canal', ant_inicio, ant_fin, None, (), 'venta')
+    db.agrupar_ventas(proveedor, 'codigo_producto', ant_inicio, ant_fin, None, (), 'venta')
+    for campo in ('canal', 'sede'):
+        db.agrupar_ventas_mes(proveedor, campo, inicio, maximo, ())
+        db.agrupar_ventas_mes(proveedor, campo, ant_inicio, ant_fin, ())
     db.segmentos(proveedor, inicio, maximo, (), 'sede')
     db.clientes_segmento(proveedor, inicio, maximo, (), None, CLIENTES_EN_PANTALLA)
     hallazgos.calcular(proveedor, inicio, maximo, ())
@@ -226,6 +230,22 @@ def api_agrupado(campo):
     top = request.args.get('top', type=int)
     orden = request.args.get('orden', 'venta')
     return jsonify(db.agrupar_ventas(_proveedor(), campo, desde, hasta, top, _filtros(), orden))
+
+
+@app.route('/api/agrupado_mes/<campo>')
+@login_required
+def api_agrupado_mes(campo):
+    if campo not in db.DIM_VENTAS:
+        abort(400)
+    desde, hasta = _rango_query()
+    return jsonify(db.agrupar_ventas_mes(_proveedor(), campo, desde, hasta, _filtros()))
+
+
+@app.route('/api/universo')
+@login_required
+def api_universo():
+    _, hasta = _rango_query()
+    return jsonify(db.universo(_proveedor(), request.args.get('dim', 'sede'), hasta, _filtros()))
 
 
 @app.route('/api/segmentos')

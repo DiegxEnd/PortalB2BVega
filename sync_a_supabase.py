@@ -313,6 +313,32 @@ def subir_rotacion(conn, proveedor, carpeta):
     print(f'  -> {len(valores):,} filas de rotación sincronizadas ({df["sede"].nunique()} sucursales).')
 
 
+# Universo de clientes de Vega (consulta mensual a vHelpYam). Universo.csv es opcional.
+COLUMNAS_UNIVERSO = {'COB': 'clientes', 'Clientes': 'clientes', 'Sucursal': 'sede', 'Sede': 'sede', 'Distrito': 'distrito'}
+
+
+def subir_universo(conn, carpeta, periodo=None):
+    """
+    Foto mensual del universo por sede y distrito: reemplaza el mes `periodo`
+    (por defecto, el mes actual en Lima). No es parte de la carga diaria.
+    """
+    df = _leer(os.path.join(carpeta, 'Universo.csv'), COLUMNAS_UNIVERSO)
+    if df is None:
+        print('  (no se encontró Universo.csv, se omite)')
+        return
+    periodo = periodo or datetime.now(ZoneInfo('America/Lima')).strftime('%Y-%m')
+    df = df.dropna(subset=['sede', 'distrito'])
+    df['sede'] = df['sede'].str.split().str.join(' ')   # 'NESTLE  - NORTE' -> 'NESTLE - NORTE'
+    df['clientes'] = pd.to_numeric(df['clientes'], errors='coerce').fillna(0).astype(int)
+    df = df.groupby(['sede', 'distrito'], as_index=False)['clientes'].sum()
+    valores = [(periodo, r.sede, r.distrito, int(r.clientes)) for r in df.itertuples(index=False)]
+    with conn.cursor() as cur:
+        cur.execute('delete from universo where periodo = %s', (periodo,))
+        psycopg2.extras.execute_values(cur, 'insert into universo (periodo, sede, distrito, clientes) values %s', valores)
+    conn.commit()
+    print(f'  -> universo {periodo}: {len(valores):,} sede-distrito, {df["clientes"].sum():,} clientes.')
+
+
 def _leer_maestro(carpeta):
     """
     Maestro de productos de PEUSAC: CategoriaProveedor.xlsx (o Productos.csv).
@@ -376,7 +402,20 @@ def main():
                     help='Carga solo el maestro de productos (CategoriaProveedor.xlsx); no es parte de la carga diaria')
     ap.add_argument('--reemplazar', action='store_true',
                     help='Borra las ventas del rango de fechas de los CSV antes de cargarlas (recarga limpia)')
+    ap.add_argument('--universo', action='store_true',
+                    help='Carga solo el universo de clientes (Universo.csv); una vez al mes')
+    ap.add_argument('--periodo', help='Mes del universo, AAAA-MM (por defecto, el mes actual)')
     args = ap.parse_args()
+
+    if args.universo:
+        conn = _conectar()
+        try:
+            print('Sincronizando universo de clientes...')
+            subir_universo(conn, args.carpeta, args.periodo)
+        finally:
+            conn.close()
+        print('Listo.')
+        return
 
     if args.maestro:
         conn = _conectar()

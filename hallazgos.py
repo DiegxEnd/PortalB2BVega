@@ -63,9 +63,12 @@ def _var(actual, anterior):
     return (actual - anterior) / anterior * 100
 
 
-def _hallazgo(tipo, icono, titulo, detalle, accion=None, prioridad=50):
+def _hallazgo(tipo, icono, titulo, detalle, accion=None, prioridad=50, bloque=None):
+    """bloque: 'ventas' (cambia con el período) o 'inventario' (foto de hoy)."""
+    if bloque is None:
+        bloque = "inventario" if tipo == "quiebre" or icono == "archive" else "ventas"
     return {"tipo": tipo, "icono": icono, "titulo": titulo, "detalle": detalle,
-            "accion": accion, "prioridad": prioridad}
+            "accion": accion, "prioridad": prioridad, "bloque": bloque}
 
 
 # ---------------------------------------------------------------------------
@@ -149,9 +152,13 @@ def calcular(proveedor, desde, hasta, filtros=()):
     dims = _dimensiones_con_datos(variacion) - {campo for campo, _ in filtros}
     hallazgos = []
     texto = []          # segmentos del párrafo: {"t": texto, "e": "b"|"up"|"down"}
+    texto_inv = []      # el inventario va aparte: es la foto de hoy, no del período
 
     def t(s, e=None):
         texto.append({"t": s, "e": e} if e else {"t": s})
+
+    def ti(s, e=None):
+        texto_inv.append({"t": s, "e": e} if e else {"t": s})
 
     # --- Inventario por producto (suma stock y venta por separado, luego divide)
     productos = {}
@@ -203,14 +210,62 @@ def calcular(proveedor, desde, hasta, filtros=()):
     else:
         t(". ")
     if dias_marca is not None:
-        t("El inventario alcanza para ")
-        t(f"{_entero(dias_marca)} días", "b")
+        ti("Con el stock de hoy, el inventario alcanza para ")
+        ti(f"{_entero(dias_marca)} días", "b")
         if en_riesgo:
-            t(", pero hay ")
-            t(f"{len(en_riesgo)} producto{'s' if len(en_riesgo) > 1 else ''} en riesgo de quiebre", "down")
-        t(".")
+            ti(", pero hay ")
+            ti(f"{len(en_riesgo)} producto{'s' if len(en_riesgo) > 1 else ''} en riesgo de quiebre", "down")
+        ti(".")
     elif stock_total <= 0 and filtros_stock:
-        t("Todavía no hay stock asociado a esta selección (falta asignar la sede de los almacenes), así que no se calculan días de inventario.")
+        ti("Todavía no hay stock asociado a esta selección (falta asignar la sede de los almacenes), así que no se calculan días de inventario.")
+
+    # --- Ventas por sede: la que más crece y la que más cae frente al año anterior
+    if hay_anterior and "sede" in dims:
+        sedes = [f for f in variacion if f["dimension"] == "sede" and not str(f["clave"]).startswith("SIN ")]
+        minimo = max(1000, act["venta_neta"] * 0.01)
+        txt_ant = _periodo_txt(ant_desde_s, ant_hasta_s)
+        for f, s in ((max(sedes, key=lambda f: f["venta_act"] - f["venta_ant"], default=None), 1),
+                     (min(sedes, key=lambda f: f["venta_act"] - f["venta_ant"], default=None), -1)):
+            if not f:
+                continue
+            cambio = f["venta_act"] - f["venta_ant"]
+            v = _var(f["venta_act"], f["venta_ant"])
+            if s * cambio <= 0 or abs(cambio) < minimo or v is None or abs(v) < UMBRAL_VARIACION:
+                continue
+            dif_clientes = f["clientes_act"] - f["clientes_ant"]
+            hallazgos.append(_hallazgo(
+                "positivo" if s > 0 else "alerta", "map-pin",
+                f"{f['clave']} {'creció' if s > 0 else 'cayó'} {_pct(v)} frente a {txt_ant} ({'+' if s > 0 else '−'}{_soles(abs(cambio))})",
+                f"Vendió {_soles(f['venta_act'])} frente a {_soles(f['venta_ant'])}, con {_num(f['clientes_act'])} clientes "
+                f"({'+' if dif_clientes >= 0 else '−'}{_num(abs(dif_clientes))} frente al año anterior).",
+                {"tab": "ventas", "dim": "sede", "label": "Ver venta por sede"},
+                prioridad=78 if s < 0 else 45))
+
+    # --- Inventario por sede: dónde están los quiebres y el sobrestock
+    if inventario and stock_total > 0 and "sede" not in {campo for campo, _ in filtros}:
+        por_sede = {}
+        for f in inventario:
+            if str(f["sede"]).startswith("SIN ") or not f["venta_diaria"]:
+                continue
+            dias_f = f["stock_cajas"] / f["venta_diaria"]
+            g = por_sede.setdefault(f["sede"], {"quiebre": 0, "sobre": 0})
+            g["quiebre"] += dias_f < UMBRAL_QUIEBRE
+            g["sobre"] += dias_f > UMBRAL_SOBRESTOCK
+        for clave, umbral, tipo, icono, prioridad in (
+                ("quiebre", f"menos de {UMBRAL_QUIEBRE}", "quiebre", "triangle-alert", 70),
+                ("sobre", f"más de {UMBRAL_SOBRESTOCK}", "revisar", "archive", 48)):
+            sedes = sorted(((s, g[clave]) for s, g in por_sede.items() if g[clave]), key=lambda x: -x[1])
+            if not sedes:
+                continue
+            s, n = sedes[0]
+            otras = ", ".join(f"{x} {c}" for x, c in sedes[1:4])
+            hallazgos.append(_hallazgo(
+                tipo, icono,
+                f"{s} tiene {n} SKU{'s' if n > 1 else ''} con {umbral} días de inventario",
+                (f"También: {otras}. " if otras else "")
+                + "Cuenta productos por sede (stock de la sede ÷ su rotación diaria).",
+                {"tab": "inventario", "nivel": "producto", "label": "Ver inventario"},
+                prioridad=prioridad, bloque="inventario"))
 
     # --- Datos desactualizados
     if ultima:
@@ -348,6 +403,7 @@ def calcular(proveedor, desde, hasta, filtros=()):
     return {
         "periodo": {"desde": desde, "hasta": hasta, "ant_desde": ant_desde_s, "ant_hasta": ant_hasta_s},
         "resumen": texto,
+        "resumen_inventario": texto_inv,
         "hallazgos": hallazgos,
         "alertas": sum(1 for h in hallazgos if h["tipo"] in ("alerta", "quiebre")),
     }
