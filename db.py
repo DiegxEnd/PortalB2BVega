@@ -475,9 +475,9 @@ def universo(proveedor, dimension, hasta=None, filtros=()):
     if any(campo in FILTROS_SIN_UNIVERSO for campo, _ in filtros):
         return None
     mes = str(hasta)[:7] if hasta else "9999-12"
-    params = {"mes": mes, "sedes": opciones_filtros(proveedor).get("sede") or []}
+    params = {"mes": mes, "proveedor": proveedor}
     condiciones = ["u.periodo = (SELECT COALESCE(MAX(periodo) FILTER (WHERE periodo <= :mes), MIN(periodo)) FROM public.universo)",
-                   "u.sede = ANY(:sedes)"]
+                   "u.sede IN (SELECT DISTINCT sede FROM public.ventas WHERE proveedor_codigo = :proveedor AND sede IS NOT NULL)"]
     for campo, valores in filtros:
         if campo in ("sede", "distrito") and valores:
             condiciones.append(f"u.{campo} = ANY(:u_{campo})")

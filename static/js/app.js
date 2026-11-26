@@ -494,12 +494,12 @@ async function cargarHallazgos(vigente, promesa) {
   const inventario = d.hallazgos.filter(h => h.bloque === 'inventario').map(item).join('');
   caja.innerHTML = `<div class="card hz">
     <div class="hz-head"><span class="ic">${icon('sparkles')}</span>
-      <div style="flex:1"><h3>Hallazgos</h3><small>Generados con reglas sobre tus datos reales${hayFiltros() ? ' · con tus filtros' : ''}</small></div>
+      <div style="flex:1"><h3>Alertas del período</h3><small>Solo lo que requiere acción${hayFiltros() ? ' · con tus filtros' : ''}</small></div>
       ${d.alertas ? `<span class="tag t-red">${d.alertas} alerta${d.alertas > 1 ? 's' : ''}</span>` : '<span class="tag t-green">Sin alertas</span>'}</div>
     <div class="hz-bloque">
       <div class="hz-bt">${icon('chart-column-big')}<b>Ventas de ${etiquetaPeriodo(d.periodo.desde, d.periodo.hasta)}</b><span>vs ${etiquetaPeriodo(d.periodo.ant_desde, d.periodo.ant_hasta)} · cambia con el período elegido</span></div>
       <p class="hz-txt">${parrafo(d.resumen)}</p>
-      <div class="hz-list">${ventas || '<div class="sub">No hay cambios relevantes en este período.</div>'}</div>
+      <div class="hz-list">${ventas || '<div class="sub">Sin alertas de ventas en este período.</div>'}</div>
     </div>
     <div class="hz-bloque inv">
       <div class="hz-bt">${icon('warehouse')}<b>Inventario hoy</b><span>foto actual del stock · no cambia con el período</span></div>
@@ -695,7 +695,8 @@ const DIMENSIONES = [
   { k: 'codigo_proveedor', l: 'Código proveedor', ic: 'hash' },
   { k: 'codigo_producto', l: 'Producto', ic: 'package' },
 ];
-let EXP = { dim: 'canal', orden: 'venta', top: 25 };
+// Abre en Sede: así se ven de entrada el universo de Vega y la penetración.
+let EXP = { dim: 'sede', orden: 'venta', top: 25 };
 
 async function vistaVentas(vigente) {
   const d = DIMENSIONES.find(x => x.k === EXP.dim);
@@ -729,7 +730,7 @@ async function vistaVentas(vigente) {
     f.penetracion = f.universo ? suma / meses.length / f.universo * 100 : null;
   });
   const pen = uni ? penetracionTotal(uni, mes) : null;
-  MES_A_MES = { filas, mesAct, mesAnt, meses, nombre: f => (EXP.dim === 'codigo_producto' ? f.descripcion : f.clave), titulo: d.l };
+  MES_A_MES = { filas, mesAct, mesAnt, meses, uni, nombre: f => (EXP.dim === 'codigo_producto' ? f.descripcion : f.clave), titulo: d.l };
   const anioAnt = etiquetaPeriodo(ant.ini, ant.fin);
   const enClientes = EXP.orden === 'cobertura';
   const metrica = enClientes ? 'cobertura' : 'venta';
@@ -802,25 +803,39 @@ function mesesDelPeriodo() {
 }
 
 // Comparativo mes a mes: por cada mes del período, el año actual, el anterior
-// y la variación, en soles o en clientes. Se redibuja sin volver a consultar.
+// y la variación, en soles, clientes o penetración (esta última solo con Sede
+// o Distrito, que es como viene el universo). Se redibuja sin volver a consultar.
 let MES_A_MES = null;
 let MES_MET = 'venta';
 function tablaMesAMes() {
   const caja = document.getElementById('mesAMes');
   if (!caja || !MES_A_MES) return;
-  const { filas, mesAct, mesAnt, meses, nombre, titulo } = MES_A_MES;
-  const enClientes = MES_MET === 'cobertura';
-  const idx = lista => new Map(lista.map(m => [`${m.clave}|${m.mes}`, enClientes ? m.cobertura : m.venta]));
+  const { filas, mesAct, mesAnt, meses, nombre, titulo, uni } = MES_A_MES;
+  if (MES_MET === 'penetracion' && !uni) MES_MET = 'venta';
+  const enClientes = MES_MET === 'cobertura', enPen = MES_MET === 'penetracion';
+  const valor = m => enPen ? m.cobertura : enClientes ? m.cobertura : m.venta;
+  const idx = lista => new Map(lista.map(m => [`${m.clave}|${m.mes}`, valor(m)]));
   const act = idx(mesAct), antM = idx(mesAnt);
-  const fmtV = v => v == null ? '—' : enClientes ? fmt(v) : moneyC(v);
-  const cabeza1 = meses.map(ym => `<th colspan="3" class="grp">${mesLargo(ym)} vs ${MESES[+ym.slice(5) - 1]} ${+ym.slice(0, 4) - 1}</th>`).join('');
-  const cabeza2 = meses.map(ym => `<th class="n">${ym.slice(0, 4)}</th><th class="n">${+ym.slice(0, 4) - 1}</th><th class="n sep">Var.</th>`).join('');
-  const cuerpo = filas.map(f => `<tr><td><b>${esc(String(nombre(f)).slice(0, 40))}</b></td>${meses.map(ym => {
-    const a = act.get(`${f.clave}|${ym}`), b = antM.get(`${f.clave}|${menosUnAnio(ym + '-01').slice(0, 7)}`);
-    return `<td class="n">${fmtV(a)}</td><td class="n muted-c">${fmtV(b)}</td><td class="n sep">${a == null ? '—' : variacionCelda(delta(a, b))}</td>`;
+  // Penetración = clientes del mes ÷ universo de la fila. El universo es la foto
+  // más reciente: el mismo para los dos años.
+  const pen = (f, v) => v == null || !uni?.filas[f.clave] ? null : v / uni.filas[f.clave] * 100;
+  const fmtV = v => v == null ? '—' : enPen ? fmt1(v) + '%' : enClientes ? fmt(v) : moneyC(v);
+  // La penetración no se compara con el año anterior: el universo es una sola
+  // foto (la actual), así que solo se muestra la de cada mes del período.
+  const cabeza1 = meses.map(ym => enPen ? `<th class="grp n sep">${mesLargo(ym)}</th>` : `<th colspan="3" class="grp">${mesLargo(ym)} vs ${MESES[+ym.slice(5) - 1]} ${+ym.slice(0, 4) - 1}</th>`).join('');
+  const cabeza2 = enPen ? '' : meses.map(ym => `<th class="n">${ym.slice(0, 4)}</th><th class="n">${+ym.slice(0, 4) - 1}</th><th class="n sep">Var.</th>`).join('');
+  const cuerpo = filas.map(f => `<tr><td><b>${esc(String(nombre(f)).slice(0, 40))}</b></td>${uni ? `<td class="n sep">${uni.filas[f.clave] ? fmt(uni.filas[f.clave]) : '—'}</td>` : ''}${meses.map(ym => {
+    let a = act.get(`${f.clave}|${ym}`), b = antM.get(`${f.clave}|${menosUnAnio(ym + '-01').slice(0, 7)}`);
+    if (enPen) return `<td class="n sep">${a == null ? '—' : `<b>${fmtV(pen(f, a))}</b>`}</td>`;
+    const v = a == null ? '—' : variacionCelda(delta(a, b));
+    return `<td class="n">${fmtV(a)}</td><td class="n muted-c">${fmtV(b)}</td><td class="n sep">${v}</td>`;
   }).join('')}</tr>`).join('');
-  caja.innerHTML = card('Comparativo mes a mes', filas.length ? `<div class="ov"><table class="mam"><thead><tr><th rowspan="2">${esc(titulo)}</th>${cabeza1}</tr><tr>${cabeza2}</tr></thead><tbody>${cuerpo}</tbody></table></div>` : vacio('Sin datos para los filtros elegidos', 'search-x'),
-    { ic: 'calendar-range', sub: `Cada mes del período frente al mismo mes del año anterior, en ${enClientes ? 'clientes (cobertura del mes)' : 'soles'}`, tono: 't-violet', extra: segMetrica('MES_MET', MES_MET, 'tablaMesAMes()') });
+  const opciones = { venta: 'Soles', cobertura: 'Clientes', ...(uni ? { penetracion: 'Penetración' } : {}) };
+  const seg = `<div class="seg">${Object.entries(opciones).map(([k, l]) => `<button class="${MES_MET === k ? 'on' : ''}" onclick="MES_MET='${k}';tablaMesAMes()">${l}</button>`).join('')}</div>`;
+  const sub = enPen ? `Clientes del mes ÷ universo Vega (foto de ${mesLargo(uni.periodo)}). Sin comparación con el año anterior: el universo es la foto actual`
+    : `Cada mes del período frente al mismo mes del año anterior, en ${enClientes ? 'clientes (cobertura del mes)' : 'soles'}`;
+  caja.innerHTML = card('Comparativo mes a mes', filas.length ? `<div class="ov"><table class="mam"><thead><tr><th rowspan="${enPen ? 1 : 2}">${esc(titulo)}</th>${uni ? `<th rowspan="${enPen ? 1 : 2}" class="n sep">Universo Vega</th>` : ''}${cabeza1}</tr>${cabeza2 ? `<tr>${cabeza2}</tr>` : ''}</thead><tbody>${cuerpo}</tbody></table></div>` : vacio('Sin datos para los filtros elegidos', 'search-x'),
+    { ic: 'calendar-range', sub, tono: 't-violet', extra: seg });
   icons();
 }
 

@@ -399,6 +399,10 @@ def calcular(proveedor, desde, hasta, filtros=()):
                 "Es el producto líder: cualquier quiebre suyo pesa mucho en el total.",
                 {"tab": "ventas", "dim": "codigo_producto", "label": "Ver top productos"}, prioridad=20))
 
+    # Solo lo que pide una acción (pedido PEUSAC, nov 2026): caídas, quiebres,
+    # sobrestock y datos viejos. Los positivos y los datos informativos ya
+    # están en el párrafo de resumen.
+    hallazgos = [h for h in hallazgos if h["tipo"] in ("alerta", "quiebre", "revisar")]
     hallazgos.sort(key=lambda h: -h["prioridad"])
     return {
         "periodo": {"desde": desde, "hasta": hasta, "ant_desde": ant_desde_s, "ant_hasta": ant_hasta_s},

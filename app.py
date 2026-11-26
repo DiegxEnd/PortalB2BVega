@@ -68,6 +68,8 @@ def _precalentar_proveedor(proveedor):
     db.agrupar_ventas(proveedor, 'sede', ant_inicio, ant_fin, None, (), 'venta')
     db.agrupar_ventas(proveedor, 'canal', ant_inicio, ant_fin, None, (), 'venta')
     db.agrupar_ventas(proveedor, 'codigo_producto', ant_inicio, ant_fin, None, (), 'venta')
+    for campo in ('sede', 'distrito'):
+        db.universo(proveedor, campo, maximo, ())
     for campo in ('canal', 'sede'):
         db.agrupar_ventas_mes(proveedor, campo, inicio, maximo, ())
         db.agrupar_ventas_mes(proveedor, campo, ant_inicio, ant_fin, ())
