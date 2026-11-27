@@ -391,3 +391,10 @@ table.mam td, table.mam th { white-space: nowrap; }
   .fpop { position: fixed; left: 1rem; right: 1rem; width: auto; top: 30%; }
 }
 .cel-sub { display: block; font-size: .72rem; color: var(--mut); font-weight: 400; white-space: nowrap; }
+.btn-exp { padding: .3rem .4rem; margin-left: .3rem; }
+.btn-exp .lucide { width: 15px; height: 15px; }
+.foco { position: fixed; inset: 0; z-index: 100; background: rgba(15, 23, 42, .55); display: flex; padding: 2vh 2vw; }
+.foco-in { background: var(--card); border-radius: 16px; flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 1rem 1.2rem; }
+.foco-h { display: flex; justify-content: space-between; align-items: center; margin-bottom: .7rem; }
+.foco-h h3 { margin: 0; font-size: 1.05rem; }
+.foco .ov { max-height: none; flex: 1; }

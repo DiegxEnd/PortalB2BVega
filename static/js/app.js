@@ -26,7 +26,30 @@ const pct = (a, b) => (b ? (a / b) * 100 : 0);
 const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const esc = t => String(t ?? '').replace(/[&<>"']/g, c => ESC_MAP[c]);
 const icon = (name, extra = '') => `<i data-lucide="${name}" ${extra}></i>`;
-const icons = () => window.lucide && lucide.createIcons();
+const icons = () => { agregarExpandir(); window.lucide && lucide.createIcons(); };
+
+// Modo foco (como en Power BI): toda tarjeta con tabla lleva un botón que la
+// abre a pantalla completa, sin el límite de alto ni el scroll interno.
+function agregarExpandir() {
+  document.querySelectorAll('#view .card').forEach(c => {
+    const h = c.querySelector(':scope > .card-h');
+    if (!h || !c.querySelector('.ov') || h.querySelector('.btn-exp')) return;
+    h.insertAdjacentHTML('beforeend', `<button class="btn btn-ghost btn-sm btn-exp" title="Agrandar tabla" aria-label="Agrandar tabla" onclick="expandirTabla(this)"><i data-lucide="maximize-2"></i></button>`);
+  });
+}
+function expandirTabla(btn) {
+  const card = btn.closest('.card');
+  const titulo = card.querySelector('.card-h h3')?.textContent || '';
+  const capa = document.createElement('div');
+  capa.className = 'foco';
+  capa.onclick = e => { if (e.target === capa) cerrarFoco(); };
+  capa.innerHTML = `<div class="foco-in"><div class="foco-h"><h3>${esc(titulo)}</h3><button class="btn btn-ghost btn-sm" onclick="cerrarFoco()"><i data-lucide="minimize-2"></i>Cerrar</button></div></div>`;
+  card.querySelectorAll('.ov').forEach(ov => capa.querySelector('.foco-in').appendChild(ov.cloneNode(true)));
+  document.body.appendChild(capa);
+  window.lucide && lucide.createIcons();
+}
+function cerrarFoco() { document.querySelectorAll('.foco').forEach(f => f.remove()); }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') cerrarFoco(); });
 const MESES = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
 const DIAS_SEM = ['', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'];
 const mesLabel = k => { const [y, m] = k.split('-'); return `${MESES[+m - 1]} ${y.slice(2)}`; };
@@ -246,6 +269,7 @@ function aplicarMeses(desde, hasta, preset = null) {
   if (desde > hasta) [desde, hasta] = [hasta, desde];
   const ini = `${desde}-01`, fin = finDeMes(hasta);
   FECHAS = { desde, hasta, preset, ini: ini < RANGO.min ? RANGO.min : ini, fin: fin > RANGO.max ? RANGO.max : fin };
+  PAQ_FECHAS = { ini: null, fin: null };   // Descargas vuelve a tomar los meses elegidos
   render();
 }
 function aplicarPreset(k) {
@@ -1062,6 +1086,13 @@ function agruparDias(filas, nivel) {
 //  DESCARGAS
 // =======================================================================
 let PAQ_SEL = { ventas: true, stock: true };
+let PAQ_FECHAS = { ini: null, fin: null };
+function cambiarFechaPaquete(campo, valor) {
+  if (!valor) return;
+  PAQ_FECHAS[campo] = valor;
+  if (PAQ_FECHAS.ini > PAQ_FECHAS.fin) [PAQ_FECHAS.ini, PAQ_FECHAS.fin] = [PAQ_FECHAS.fin, PAQ_FECHAS.ini];
+  render();
+}
 const COLS_VENTAS = ['nro_documento', 'fecha_documento', 'codigo_cliente', 'canal', 'tipo_negocio', 'sede', 'distrito', 'jefe_ventas', 'supervisor', 'nombre_vendedor', 'codigo_vendedor', 'ruta', 'linea', 'marca', 'categoria', 'codigo_proveedor', 'codigo_producto', 'descripcion_producto', 'cantidad_unidad_minima', 'tipo_unidad_minima', 'cantidad_unidad_maxima', 'tipo_unidad_maxima', 'importe_neto_sin_impuesto', 'importe_neto_con_impuesto'];
 const COLS_STOCK = ['codigo_almacen', 'nombre_almacen', 'codigo_proveedor', 'codigo_producto', 'linea', 'marca', 'categoria', 'producto_descripcion', 'lote', 'stock_unidad_minima', 'unidad_medida_minima', 'stock_unidades_maximas', 'unidad_medida_maxima', 'factor', 'stock_cajas_unidades', 'valor_stock', 'periodo'];
 
@@ -1071,8 +1102,19 @@ async function vistaPaquete() {
       <div class="kpi-ic ${tono}">${icon(ic)}</div>
       <div><b>${titulo}</b><span>${desc}</span><div class="cols">${cols.map(c => `<code>${c}</code>`).join('')}</div></div>
       <div class="chk">${PAQ_SEL[k] ? icon('check') : ''}</div></div>`;
+  // Descargas tiene su propio rango por días (el filtro de arriba es por meses).
+  if (!PAQ_FECHAS.ini) PAQ_FECHAS = { ini: FECHAS.ini, fin: FECHAS.fin };
   document.getElementById('view').innerHTML = `
-    ${nota(`Ventas se descarga de <b>${etiquetaPeriodo(FECHAS.ini, FECHAS.fin)}</b> (cámbialo arriba). Los meses del año anterior traen solo las columnas que se guardan de ese año. ${hayFiltros() ? 'Los <b>filtros activos</b> también se aplican a la descarga.' : 'Sin filtros: se descarga todo.'} Stock siempre es la foto más reciente.`, 'calendar-check')}
+    <div class="card" style="margin-bottom:1rem"><div class="card-h"><div class="ic t-red">${icon('calendar-range')}</div><div><h3>Rango de fechas de la descarga de ventas</h3><small>Elige los días exactos; no depende del filtro de meses de arriba</small></div></div>
+      <div class="fb-dates" style="display:inline-flex">
+        ${icon('calendar-days')}
+        <input type="date" value="${PAQ_FECHAS.ini}" min="${RANGO.min}" max="${RANGO.max}" onchange="cambiarFechaPaquete('ini', this.value)" aria-label="Desde">
+        <span>→</span>
+        <input type="date" value="${PAQ_FECHAS.fin}" min="${RANGO.min}" max="${RANGO.max}" onchange="cambiarFechaPaquete('fin', this.value)" aria-label="Hasta">
+      </div>
+      <button class="btn btn-ghost btn-sm" style="margin-left:.5rem" onclick="PAQ_FECHAS={ini:FECHAS.ini,fin:FECHAS.fin};render()">Usar los meses de arriba</button>
+    </div>
+    ${nota(`Ventas se descarga del <b>${fechaCorta(PAQ_FECHAS.ini)} ${PAQ_FECHAS.ini.slice(0, 4)} al ${fechaCorta(PAQ_FECHAS.fin)} ${PAQ_FECHAS.fin.slice(0, 4)}</b>. Las fechas de 2025 traen solo las columnas que se guardan de ese año. ${hayFiltros() ? 'Los <b>filtros activos</b> también se aplican a la descarga.' : 'Sin filtros: se descarga todo.'} Stock siempre es la foto más reciente.`, 'calendar-check')}
     <div class="pkg">
       ${pkg('ventas', 'receipt-text', 't-red', 'Ventas', 'Detalle por documento y producto, con sede, distrito, categoría y código proveedor.', COLS_VENTAS)}
       ${pkg('stock', 'warehouse', 't-blue', 'Stock', 'Foto del inventario por almacén y lote, con categoría, código proveedor y factor.', COLS_STOCK)}
@@ -1086,7 +1128,7 @@ function descargarPaquete() {
   const b = document.getElementById('btnDesc');
   b.disabled = true; b.innerHTML = '<span class="spinner"></span>Preparando archivo…';
   setTimeout(() => { b.disabled = false; b.innerHTML = `${icon('download')}Descargar de nuevo`; icons(); }, 6000);
-  location.href = '/api/exportar.csv' + qs({ ventas: PAQ_SEL.ventas ? 1 : 0, stock: PAQ_SEL.stock ? 1 : 0 });
+  location.href = '/api/exportar.csv' + qs({ desde: PAQ_FECHAS.ini || FECHAS.ini, hasta: PAQ_FECHAS.fin || FECHAS.fin, ventas: PAQ_SEL.ventas ? 1 : 0, stock: PAQ_SEL.stock ? 1 : 0 });
 }
 
 boot();
